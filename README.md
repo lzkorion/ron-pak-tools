@@ -87,7 +87,7 @@ python tools/ronconvert.py "C:\你的模组文件夹" --dry-run
 需要 **Python 3.10+**（用到 `X | None` 类型语法）。无需第三方库，只用标准库。
 
 ```powershell
-git clone https://github.com/<你的用户名>/ron-pak-tools.git
+git clone https://github.com/lzkorion/ron-pak-tools.git
 cd ron-pak-tools
 python tools/ronconvert.py "C:\你的模组文件夹" --dry-run
 ```
