@@ -1,5 +1,7 @@
 # ron-pak-tools
 
+[![tests](https://github.com/lzkorion/ron-pak-tools/actions/workflows/tests.yml/badge.svg)](https://github.com/lzkorion/ron-pak-tools/actions/workflows/tests.yml)
+
 **Ready or Not 模组 `.pak` 诊断与转换工具**
 Detect and repair Ready or Not mods that broke after a game update.
 
@@ -132,6 +134,8 @@ python tests/run_all.py
 ```
 
 全部用**合成 pak**（`tests/fixtures.py` 现场生成），不需要游戏或真实模组。
+
+推送后 GitHub Actions 会自动跑这些测试（Ubuntu + Windows，Python 3.10 / 3.11 / 3.13），另外还会检查仓库里没有混入游戏数据或 Epic 工具。
 
 ### 工作原理（为什么不会损坏内容）
 
