@@ -3,7 +3,7 @@
 **Ready or Not 模组 `.pak` 诊断与转换工具**
 Detect and repair Ready or Not mods that broke after a game update.
 
-[中文](#中文) · [English](#english) · [NOTICE.md](NOTICE.md) · [LICENSE](LICENSE) (MIT)
+[中文](#中文) · [English](#english) · **[下载 exe](https://github.com/lzkorion/ron-pak-tools/releases/latest)** · [NOTICE.md](NOTICE.md) · [LICENSE](LICENSE) (MIT)
 
 > ⚠️ **非官方第三方工具**，与 VOID Interactive / Epic Games **无任何关联**，未获其授权或背书。
 > 本项目**不含**任何游戏资产、游戏数据清单或 Epic 工具。
@@ -42,6 +42,20 @@ Ready or Not 每次大更新，都会**把一部分热门模组的内容直接�
 | **重新打包** | 自己实现 pak v11/v12 写入器，压缩数据原样搬运，保留条目**逐字节不变** |
 | **官方校验** | 可选调用本机 UnrealPak 做 `-List` / `-Test` 复核 |
 | **图形界面** | 双击 exe 就能用，不需要命令行 |
+
+### 下载即用（不需要装 Python）
+
+**[⬇ 下载 RoNPakTools.exe](https://github.com/lzkorion/ron-pak-tools/releases/latest)**
+（约 11 MB，Windows 10/11 64 位，免安装）
+
+下载后核对一下校验和更稳妥：
+
+```powershell
+Get-FileHash .\RoNPakTools.exe -Algorithm SHA256
+```
+
+首次运行会让你先生成「官方资产清单」——用你自己安装的游戏在本机生成，
+只写在你电脑上，**不包含也不上传任何游戏数据**。
 
 ### 快速开始
 
@@ -176,6 +190,14 @@ and repacks the mod without the conflicting parts.
 | **Repacking** | Own pak v11/v12 writer. Compressed bytes are copied verbatim, so kept entries stay **byte-identical** |
 | **Verification** | Optionally calls your local UnrealPak for `-List` / `-Test` |
 | **GUI** | Double-click the exe — no command line needed |
+
+### Download
+
+**[⬇ Download RoNPakTools.exe](https://github.com/lzkorion/ron-pak-tools/releases/latest)**
+(~11 MB, Windows 10/11 x64, portable, no Python required)
+
+On first run it generates an "official asset manifest" from *your own* game
+installation. It stays on your machine and is never uploaded.
 
 ### Quick start
 
