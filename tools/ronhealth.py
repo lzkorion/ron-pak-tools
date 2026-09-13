@@ -444,12 +444,18 @@ def assess(src: str, official: RC.OfficialAssets | None = None, *,
            verify: bool = False, log=None) -> dict:
     """先诊断：给出「该不该转换」的结论，然后再决定要不要转。
 
-    返回 dict：{verdict, label, why, reasons[], should_convert, health, diag}
+    返回 dict：{verdict, label, why, reasons[], should_convert, health, diag,
+                kinds[], kind_note, rename}
     """
     emit = log or (lambda *_a, **_k: None)
+    # check() 内部会自己扫 peers，但 assess 自己算冲突也要用 —— 先补上，
+    # 否则「没前缀 + 被别家压着」会漏掉，改完名刚好和人家同号。
+    if peers is None and paks_dir:
+        peers = scan_peer_paks(paks_dir, src)
     h = check(src, official, paks_dir=paks_dir, peers=peers, verify=verify)
     out = {"src": src, "name": h["name"], "ok": h["ok"], "health": h,
-           "reasons": [], "diag": None}
+           "reasons": [], "diag": None, "kinds": [], "kind_note": "",
+           "rename": {"needed": False, "new_name": h["name"], "reasons": []}}
 
     def finish(code):
         label, why = VERDICTS[code]
@@ -458,6 +464,26 @@ def assess(src: str, official: RC.OfficialAssets | None = None, *,
         out["why"] = why
         out["should_convert"] = (code == "convert")
         return out
+
+    # ---- 0. 类型识别 + 要不要改名（这两项跟后面的结论无关，先算） ----
+    over_rels: list[str] = []
+    if h["ok"]:
+        try:
+            pk = P.read_pak_index(src)
+            rels = pk.all_paths()
+            if official is not None and official.has_full_index:
+                for r in rels:
+                    cands = RC.OfficialAssets.stem_variants(pk.mount_point, r)
+                    if any(c in official.full for c in cands):
+                        over_rels.append(r)
+            out["kinds"] = classify_mod(rels, over_rels)
+            out["kind_note"] = "；".join(KIND_NOTE[k] for k in out["kinds"]
+                                        if k in KIND_NOTE)
+        except Exception:
+            pass
+
+    # 加载顺序冲突：谁用更大的 chunk 号压着我 -> 该怎么改名
+    out["rename"] = rename_plan_for(src, paks_dir=paks_dir, peers=peers)
 
     # ---- 1. 读不了 ----
     if not h["ok"]:
@@ -473,14 +499,16 @@ def assess(src: str, official: RC.OfficialAssets | None = None, *,
         if "挂载点不在游戏命名空间里" in t or "挂载点不在任何官方路径下" in t:
             blockers.append(t.split("：")[0] + " —— 模组的资产挂在游戏从不访问的目录上")
         elif "不是 `_P.pak` 结尾" in t:
-            blockers.append("文件名不是 _P.pak 结尾 —— 很可能根本不加载")
+            blockers.append("文件名不是 _P.pak 结尾 —— 很可能根本不加载"
+                            "（可以用「自动改名修复」补上）")
         elif "孤儿条目" in t:
             blockers.append("有孤儿条目（只有 .uexp/.ubulk 没有 .uasset）—— "
                             "转换只会剥不会补，修不了")
         elif "头部魔数不对" in t:
             blockers.append("包内容不是合法 UE 包 —— 转换修不了")
         elif "覆盖" in t and "被 " in t:
-            blockers.append(t + " —— 换个 pakchunk 号比转换更管用")
+            blockers.append(t + " —— 换个 pakchunk 号比转换更管用"
+                            "（可以用「自动改名修复」调）")
     if blockers:
         out["reasons"].extend(blockers)
         return finish("blocked")
@@ -532,11 +560,194 @@ def assess(src: str, official: RC.OfficialAssets | None = None, *,
     return finish("no_change")
 
 
+# ---------------------------------------------------------------------------
+# 模组类型识别：这个 mod 到底是干嘛的？本工具能不能改它？
+# ---------------------------------------------------------------------------
+def _base(rel: str) -> str:
+    return rel.rsplit("/", 1)[-1].lower()
+
+
+def classify_mod(rels, over) -> list[str]:
+    """按「它真正在改什么」判断类型。
+
+    rels: 全部条目
+    over: 能对上官方路径的条目（= 它真的在覆盖官方的东西）
+    """
+    low = [r.lower() for r in rels]
+    ov = [r.lower() for r in over]
+    kinds = []
+
+    def hit(seq, pats):
+        return any(any(p in r for p in pats) for r in seq)
+
+    def name_hit(seq, prefixes):
+        return any(_base(r).startswith(prefixes) for r in seq)
+
+    if any(r.endswith(".umap") for r in low):
+        kinds.append("地图")
+    if hit(ov, ("/textures/", "/texture/")) or name_hit(ov, ("t_",)):
+        kinds.append("贴图替换")
+    if hit(ov, ("/materials/", "/material/")) or name_hit(
+            ov, ("m_", "mi_", "mpc_")):
+        kinds.append("材质替换")
+    if hit(ov, ("/meshes/", "/staticmeshes/", "/skeletalmeshes/")) or name_hit(
+            ov, ("sm_", "sk_")):
+        kinds.append("网格替换")
+    if hit(ov, ("/blueprints/", "/blueprint/", "/logicmods/")) or name_hit(
+            ov, ("bp_", "wbp_")):
+        kinds.append("蓝图/逻辑")
+    if hit(ov, ("/datatables/", "/datatable/")) or name_hit(
+            ov, ("dt_",)) or any("datatable" in _base(r) for r in ov):
+        kinds.append("数据表")
+    if hit(ov, ("/audio/", "/sounds/", "/fmod/")):
+        kinds.append("音频替换")
+    if hit(ov, ("/animations/", "/anim/")):
+        kinds.append("动画")
+    if not over:
+        kinds.append("纯新增内容")
+    if not kinds:
+        kinds.append("其它")
+    return kinds
+
+
+# 每类模组「转换（剥资产）有没有用」的说明
+KIND_NOTE = {
+    "地图": "自定义地图必须作者重新烤，重打包改变不了任何东西",
+    "贴图替换": "覆盖官方贴图是正常 mod 行为，没有可剥的东西",
+    "材质替换": "覆盖官方材质是正常 mod 行为，没有可剥的东西",
+    "网格替换": "覆盖官方网格是正常 mod 行为，没有可剥的东西",
+    "蓝图/逻辑": "蓝图最容易因为游戏更新而崩溃 —— 但也最可能是模组的功能本身",
+    "数据表": "数据表是模组改数值的主要手段，剥了就等于删功能",
+    "音频替换": "覆盖官方音频是正常 mod 行为",
+    "动画": "覆盖官方动画是正常 mod 行为",
+    "纯新增内容": "全是游戏里没有的新路径，没有可剥的东西",
+    "其它": "无法归类",
+}
+
+
+# ---------------------------------------------------------------------------
+# 自动改名修复：补 _P 后缀、解决加载顺序冲突
+# ---------------------------------------------------------------------------
+def plan_rename(src: str, *, peers: list[dict] | None = None,
+                conflict_chunks: list[int] | None = None) -> dict:
+    """算出这个 pak 该怎么改名才能生效。只做「确定性」的改动：
+
+      1. 文件名不是 `_P.pak` 结尾 -> 补上（指南点名的头号错误）
+      2. 文件名解析不出 pakchunk 号 -> 补 `pakchunk9999-` 前缀
+      3. 同名路径被 pakchunk 号更大的模组压着 -> 把号提到比它大
+
+    返回 {needed, new_name, reasons[]}；不改任何文件。
+    """
+    name = os.path.basename(src)
+    stem = name[:-4] if name.lower().endswith(".pak") else name
+    new_stem = stem
+    reasons = []
+
+    if not PATCH_RE.search(name):
+        new_stem += "_P"
+        reasons.append("补上 `_P.pak` 后缀（主线 pak 存在时补丁 pak 必须有它，"
+                       "否则很可能不加载）")
+
+    if pak_chunk(name) is None:
+        new_stem = "pakchunk9999-" + new_stem
+        reasons.append("补上 `pakchunk9999-` 前缀（没这个前缀解析不出加载顺序）")
+
+    if conflict_chunks:
+        my = pak_chunk(new_stem) or 0
+        top = max(conflict_chunks)
+        if top >= my:
+            new_stem = re.sub(r"^pakchunk\d+-", f"pakchunk{top + 1}-",
+                              new_stem, count=1, flags=re.IGNORECASE)
+            reasons.append(f"pakchunk 号从 {my} 提到 {top + 1}"
+                           f"（现在被 pakchunk{top} 压着，同一个路径数字大的赢）")
+
+    out = {"needed": bool(reasons), "new_name": new_stem + ".pak",
+           "reasons": reasons}
+    return out
+
+
+def rename_plan_for(src: str, *, paks_dir: str | None = None,
+                    peers: list[dict] | None = None) -> dict:
+    """只算「这个 pak 该怎么改名」，不做完整诊断（转换流程里顺带用）。
+
+    assess() 也走这条路径 —— 保证「诊断里看到的改名建议」和
+    「转换时实际改的名」永远是同一个结果，不会两处逻辑各说各话。
+    返回 plan_rename() 的结果，外加 readable（这个 pak 本身读得动吗）。
+    """
+    name = os.path.basename(src)
+    if peers is None and paks_dir:
+        peers = scan_peer_paks(paks_dir, src)
+    conflicts: list[int] = []
+    readable = False
+    if peers:
+        try:
+            pk = P.read_pak_index(src)
+            readable = True
+            mine = set(engine_paths(pk.mount_point, pk.all_paths()))
+            # ★ 解析不出 chunk 号时按 0 算 —— 不然「没前缀 + 被别家压着」
+            #   会被漏掉，改完名刚好和人家同号，谁生效又变成不确定。
+            my = pak_chunk(name)
+            my_rank = my if my is not None else 0
+            for pr in peers:
+                if mine & pr["full"]:
+                    pc = pr["chunk"]
+                    if pc is not None and pc >= my_rank:
+                        conflicts.append(pc)
+        except Exception:
+            pass
+    else:
+        # 没有同目录模组可比较，但文件名本身还是能读的
+        try:
+            P.read_pak_index(src)
+            readable = True
+        except Exception:
+            pass
+    rn = plan_rename(src, conflict_chunks=conflicts)
+    rn["readable"] = readable
+    return rn
+
+
+def should_fix_name(a: dict) -> bool:
+    """该不该给这个诊断结果做「自动改名修复」。
+
+    只做确定性的事（补 `_P` / 补前缀 / 调 chunk 号），而且**不碰读不动的文件**——
+    给一个损坏的 pak 生成改名副本，只会让人以为它被修好了。
+    """
+    rn = a.get("rename") or {}
+    if not rn.get("needed"):
+        return False
+    if not rn.get("readable", True):
+        return False
+    return a.get("verdict") != "unreadable"
+
+
+def apply_rename(src: str, new_name: str, outdir: str) -> str:
+    """复制一份改成新名字放进 outdir。**不动原文件**，也绝不覆盖已有文件。"""
+    import shutil
+    os.makedirs(outdir, exist_ok=True)
+    dst = os.path.join(outdir, new_name)
+    if os.path.abspath(dst) == os.path.abspath(src):
+        return src
+    n = 1
+    base, ext = os.path.splitext(dst)
+    while os.path.exists(dst):
+        dst = f"{base}({n}){ext}"
+        n += 1
+    shutil.copy2(src, dst)
+    return dst
+
+
 def render_assess(a: dict, log=None) -> None:
-    """打印「先诊断再转换」的结论。"""
+    """打印「先诊断再转换」的结论：类型 + 能不能改 + 要不要改名。"""
     emit = log or print
     emit("")
     emit(f"── {a['name']}")
+    kinds = a.get("kinds") or []
+    if kinds:
+        emit(f"   类型：{' + '.join(kinds)}")
+        for k in kinds:
+            if k in KIND_NOTE:
+                emit(f"        · {k}：{KIND_NOTE[k]}")
     if a.get("health", {}).get("ok"):
         h = a["health"]
         for f in h["findings"]:
@@ -546,6 +757,15 @@ def render_assess(a: dict, log=None) -> None:
                     emit(f"      → {f['hint']}")
     for r in a["reasons"]:
         emit(f"   · {r}")
+    rn = a.get("rename") or {}
+    if rn.get("needed"):
+        if rn.get("readable", True):
+            emit(f"   ✎ 改名就能修：{a['name']}  ->  {rn['new_name']}")
+            for r in rn["reasons"]:
+                emit(f"        · {r}")
+        else:
+            emit(f"   ✎ 名字也不对（该叫 {rn['new_name']}），"
+                 f"但这个 pak 本身读不动 —— 改名救不了坏文件")
     emit(f"   ── 诊断结论：【{a['label']}】{a['why']}")
 
 
@@ -585,8 +805,11 @@ def main() -> int:
     ap.add_argument("--verify", action="store_true",
                     help="额外调用官方 UnrealPak -List/-Test")
     ap.add_argument("--assess", action="store_true",
-                    help="先诊断再转换：只回答「这个模组能不能转、值不值得转」，"
-                         "不改任何文件")
+                    help="先诊断再转换：只回答「这个模组是什么类型、能不能改、"
+                         "值不值得改」，不改任何文件")
+    ap.add_argument("--fix-names", metavar="输出目录", default=None,
+                    help="自动改名修复：给缺 _P 后缀的补上、给加载顺序被压的"
+                         "调大 pakchunk 号，结果复制到指定目录（原文件不动）")
     ap.add_argument("--json", default=None, help="把结果写入 JSON")
     args = ap.parse_args()
 
@@ -630,16 +853,29 @@ def main() -> int:
         return 0
 
     results = []
-    if args.assess:
-        # 先诊断再转换：只给结论，不改文件
+    if args.assess or args.fix_names:
+        # 先诊断再转换（可选顺带改名修复）：只给结论 + 可选的改名副本
         ares = []
         for src in paks:
             a = assess(src, official, paks_dir=paks_dir, verify=args.verify)
+            if args.fix_names and should_fix_name(a):
+                a["fixed_path"] = apply_rename(src, a["rename"]["new_name"],
+                                               args.fix_names)
+            elif args.fix_names and a["rename"]["needed"]:
+                a["fix_skipped"] = ("这个 pak 本身读不动 —— 改名救不了坏文件，"
+                                    "没有生成副本")
             render_assess(a)
+            if a.get("fixed_path"):
+                print(f"   ✔ 已生成改名后的副本：{a['fixed_path']}")
+            elif a.get("fix_skipped"):
+                print(f"   · {a['fix_skipped']}")
             ares.append(a)
         print_assess_table(ares)
         n_conv = sum(1 for a in ares if a["should_convert"])
+        n_fix = sum(1 for a in ares if a.get("fixed_path"))
         print(f"\n其中 {n_conv} 个建议转换；其余的转了也没用，甚至会更糟。")
+        if n_fix:
+            print(f"      {n_fix} 个已生成改名后的副本（原文件没动）。")
         if args.json:
             import json
             with open(args.json, "w", encoding="utf-8") as f:

@@ -204,10 +204,25 @@ def save_config(cfg: dict) -> None:
 # ---------------------------------------------------------------------------
 # 子进程 worker —— 必须是模块级函数，且不能是 lambda/闭包（spawn 需要可 pickle）
 # ---------------------------------------------------------------------------
+def _rename_output(path: str, new_name: str) -> str:
+    """把刚生成的产物改成新名字（原地改名，绝不留两份让人不知道用哪个）。
+
+    目标名已存在时**不覆盖**：原样保留，由调用方报告。
+    """
+    dst = os.path.join(os.path.dirname(os.path.abspath(path)), new_name)
+    if os.path.abspath(dst) == os.path.abspath(path):
+        return path
+    if os.path.exists(dst):
+        return path
+    os.replace(path, dst)
+    return dst
+
+
 def _worker(mod_dir: str, outdir: str, manifest: str | None,
             verify: bool, strip_all: bool, match_name: bool,
             strip_modified: bool, health_only: bool, repack_raw: bool,
-            assess_first: bool, game_paks: str | None, q) -> None:
+            assess_first: bool, fix_names: bool, game_paks: str | None,
+            q) -> None:
     """在子进程中执行转换，通过 q 回传消息。
 
     消息格式: (kind, payload)
@@ -242,6 +257,9 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
         log(f"改过的资产: {'剥掉（可能变成能进游戏但什么都不发生）' if strip_modified else '保留（推荐：那是模组的功能本身）'}")
         if repack_raw:
             log("压缩方式 : 改成【不压缩】重新打包（用于模组用了游戏没编进去的压缩方式）")
+        if fix_names:
+            log("自动改名修复: 开启（文件名缺 _P 后缀 / 加载顺序被压着的，"
+                "顺带出一份改好名的）")
         log("=" * 70)
 
         # ---- 官方清单（由本机游戏生成，不随程序分发）----
@@ -324,6 +342,9 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                 q.put(("fatal", f"无法加载体检模块 ronhealth：{type(ex).__name__}: {ex}"))
                 return
             log("体检模式：只诊断，不生成任何文件")
+            if fix_names:
+                log("（体检模式不产出任何文件，所以「自动改名修复」在这里不生效；"
+                    "想拿改名副本请取消勾选体检模式）")
             log("")
             peers = RH.scan_peer_paks(game_paks, "") if game_paks else []
             if peers:
@@ -351,37 +372,79 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                 q.put(("prog", (done, total, _os.path.basename(src))))
         else:
             # ---- 先诊断再转换：不推荐转的直接跳过，不产出文件 ----
-            skip: set[str] = set()
-            if assess_first:
+            RH = None
+            if assess_first or fix_names:
                 try:
-                    import ronhealth as RH
+                    import ronhealth as RH          # noqa: F811
                 except Exception as ex:
-                    log(f"⚠ 无法加载诊断模块，改为全部转换：{ex}")
-                else:
-                    log("先诊断：逐个判断「能不能改、值不值得改」，只转该转的")
-                    log("=" * 70)
-                    ares = []
-                    for i, src in enumerate(paks, 1):
-                        q.put(("prog", (i - 1, total, _os.path.basename(src))))
-                        try:
-                            a = RH.assess(src, official, paks_dir=game_paks,
-                                          verify=False)
-                        except Exception as ex:
-                            a = {"name": _os.path.basename(src), "label": "读不了",
-                                 "why": f"{type(ex).__name__}: {ex}",
-                                 "reasons": [], "should_convert": False,
-                                 "health": {"ok": False, "findings": []}}
-                        RH.render_assess(a, log=log)
-                        ares.append(a)
-                        if not a["should_convert"]:
-                            skip.add(src)
-                    RH.print_assess_table(ares, log=log)
-                    log("")
-                    log(f"诊断完毕：{total - len(skip)} 个建议转换，"
-                        f"{len(skip)} 个跳过（转了也没用，甚至更糟）")
-                    log("=" * 70)
-                    if not skip:
-                        log("（没有需要跳过的）")
+                    RH = None
+                    if assess_first:
+                        log(f"⚠ 无法加载诊断模块，改为全部转换：{ex}")
+                    if fix_names:
+                        log(f"⚠ 自动改名修复跳过（模块加载失败）：{ex}")
+
+            fix_cache: dict[str, dict] = {}       # src -> 改名方案
+
+            def rename_of(src: str) -> dict:
+                """算出该改成什么名（诊断模式下直接复用诊断结果，不重算）。"""
+                if src in fix_cache:
+                    return fix_cache[src]
+                rn: dict = {}
+                if RH is not None:
+                    try:
+                        rn = RH.rename_plan_for(src, paks_dir=game_paks)
+                    except Exception as ex:
+                        log(f"   ⚠ 改名分析失败：{type(ex).__name__}: {ex}")
+                        rn = {}
+                fix_cache[src] = rn
+                return rn
+
+            def rename_copy(src: str, tag: str) -> tuple[str, str]:
+                """生成一份改好名的副本（原文件不动）。返回 (新路径, 新文件名)。"""
+                rn = rename_of(src)
+                if RH is None or not rn.get("needed"):
+                    return "", ""
+                if not rn.get("readable", True):
+                    log("   （这个 pak 读不动，不生成改名副本 —— 改名救不了坏文件）")
+                    return "", ""
+                try:
+                    newp = RH.apply_rename(src, rn["new_name"], outdir)
+                except Exception as ex:
+                    log(f"   ⚠ 改名失败：{type(ex).__name__}: {ex}")
+                    return "", ""
+                log(f"   ✎ {tag}{_os.path.basename(src)}  ->  "
+                    f"{_os.path.basename(newp)}")
+                for r in rn.get("reasons", []):
+                    log(f"        · {r}")
+                return newp, _os.path.basename(newp)
+
+            skip: set[str] = set()
+            if assess_first and RH is not None:
+                log("先诊断：逐个判断「能不能改、值不值得改」，只转该转的")
+                log("=" * 70)
+                ares = []
+                for i, src in enumerate(paks, 1):
+                    q.put(("prog", (i - 1, total, _os.path.basename(src))))
+                    try:
+                        a = RH.assess(src, official, paks_dir=game_paks,
+                                      verify=False)
+                    except Exception as ex:
+                        a = {"name": _os.path.basename(src), "label": "读不了",
+                             "why": f"{type(ex).__name__}: {ex}",
+                             "reasons": [], "should_convert": False,
+                             "health": {"ok": False, "findings": []}}
+                    fix_cache[src] = a.get("rename") or {}   # 改名建议复用诊断结果
+                    RH.render_assess(a, log=log)
+                    ares.append(a)
+                    if not a["should_convert"]:
+                        skip.add(src)
+                RH.print_assess_table(ares, log=log)
+                log("")
+                log(f"诊断完毕：{total - len(skip)} 个建议转换，"
+                    f"{len(skip)} 个跳过（转了也没用，甚至更糟）")
+                log("=" * 70)
+                if not skip:
+                    log("（没有需要跳过的）")
 
             for i, src in enumerate(paks, 1):
                 q.put(("prog", (i - 1, total, _os.path.basename(src))))
@@ -389,12 +452,19 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                     log("")
                     log(f"── {_os.path.basename(src)}")
                     log("   ⏭ 诊断判定不需要转换（也没生成文件）")
+                    renamed = fixed = ""
+                    if fix_names:
+                        fixed, renamed = rename_copy(src, "改名修复：")
+                        if fixed:
+                            log("      （原文件没动，改好名的副本已放进输出目录）")
                     done += 1
                     summary.append({
                         "name": _os.path.basename(src), "verdict": "诊断后跳过",
-                        "action": "保持原样（诊断认为转换没有意义）", "out": "",
-                        "dropped": 0, "kept": 0, "ok": True,
-                        "problems": [],
+                        "action": ("保持原样（诊断认为转换没有意义）；"
+                                   "另出了一份改好名的副本" if fixed else
+                                   "保持原样（诊断认为转换没有意义）"),
+                        "out": fixed, "dropped": 0, "kept": 0, "ok": True,
+                        "problems": [], "renamed": renamed,
                     })
                     q.put(("result", summary[-1]))
                     q.put(("prog", (done, total, _os.path.basename(src))))
@@ -437,12 +507,31 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                 if d.out_path:
                     log(f"      输出 {d.out_path}（{d.out_bytes:,} 字节）")
 
+                # 自动改名修复：产物直接改成该叫的名字（原地改名，不留两份）
+                renamed = ""
+                if fix_names and d.out_path and RH is not None:
+                    rn = rename_of(src)
+                    if rn.get("needed"):
+                        tgt = rn["new_name"]
+                        newp = _rename_output(d.out_path, tgt)
+                        if newp != d.out_path:
+                            renamed = _os.path.basename(newp)
+                            log(f"   ✎ 自动改名修复：{_os.path.basename(src)}  ->  "
+                                f"{renamed}")
+                            for r in rn.get("reasons", []):
+                                log(f"        · {r}")
+                            d.out_path = newp
+                        else:
+                            log(f"   ⚠ 想改名成 {tgt}，但输出目录里已有同名文件，"
+                                f"保留原名 {_os.path.basename(d.out_path)}")
+
                 done += 1
                 summary.append({
                     "name": _os.path.basename(src), "verdict": d.verdict,
                     "action": d.action, "out": d.out_path,
                     "dropped": d.dropped, "kept": d.kept,
                     "ok": d.ok, "problems": list(d.problems),
+                    "renamed": renamed,
                 })
                 q.put(("result", summary[-1]))
                 q.put(("prog", (done, total, _os.path.basename(src))))
@@ -451,22 +540,28 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
         buckets: dict[str, int] = {}
         for s in summary:
             buckets[s["verdict"]] = buckets.get(s["verdict"], 0) + 1
+        n_renamed = sum(1 for s in summary if s.get("renamed"))
         log("")
         log("=" * 70)
         log("汇总")
         for k, v in buckets.items():
             log(f"   {k:<16} {v}")
+        if n_renamed:
+            log(f"   {'自动改名修复':<16} {n_renamed}")
         log("")
         log("行动建议")
         for s in summary:
             log(f"   {s['name']}")
             log(f"      {s['action']}")
+            if s.get("renamed"):
+                log(f"      改好名的文件：{s['renamed']}")
         log("")
         log(f"总耗时 {time.time()-t_all:.1f} 秒")
         log(f"输出目录：{outdir}")
 
         q.put(("done", {"outdir": outdir, "total": total,
                         "buckets": buckets, "summary": summary,
+                        "renamed": n_renamed,
                         "seconds": time.time() - t_all}))
     except Exception as ex:
         try:
@@ -491,9 +586,12 @@ class App:
         self.cfg = load_config()
 
         root.title(APP_TITLE)
-        # 窗口尺寸：默认 980x720；可用 --size 宽x高 覆盖
+        # 窗口尺寸：默认 980x760；可用 --size 宽x高 覆盖
         # （小屏笔记本 / 截图时有用）。自动限制在屏幕内。
-        size = "980x720"
+        # ★ 建完控件后还会按「内容实际需要的高度」再调一次 ——
+        #   高 DPI（比如 133% 缩放）下同样的界面要高出三分之一，
+        #   固定高度会把「开始转换」按钮和日志挤出屏幕外。
+        size = "980x760"
         for i, a in enumerate(sys.argv):
             if a == "--size" and i + 1 < len(sys.argv):
                 size = sys.argv[i + 1]
@@ -504,10 +602,9 @@ class App:
             w, h = (int(x) for x in size.lower().split("x"))
             w = max(780, min(w, sw - 40))
             h = max(480, min(h, sh - 80))
-            size = f"{w}x{h}"
         except Exception:
-            size = "980x720"
-        root.geometry(size)
+            sw, sh, w, h = 1280, 800, 980, 760
+        root.geometry(f"{w}x{h}")
         root.minsize(780, 520)
 
         style = ttk.Style()
@@ -561,14 +658,14 @@ class App:
         self.match_name_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             opt, variable=self.match_name_var,
-            text="同名也剥：文件名相同就当官方已有（默认关闭；同名≠同路径，"
-                 "开了有把模组贴图误剥的风险）"
+            text="同名也剥：文件名相同就当官方已有\n"
+                 "（默认关闭；同名≠同路径，开了有把模组贴图误剥的风险）"
         ).grid(row=2, column=0, sticky="w")
 
         self.strip_modified_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             opt, variable=self.strip_modified_var,
-            text="连改过的也剥：把模组自己改过的蓝图/数据表也删掉"
+            text="连改过的也剥：把模组自己改过的蓝图/数据表也删掉\n"
                  "（默认关闭；开了多半会变成「能进游戏但什么都不发生」，"
                  "只在游戏一进就崩时才勾）"
         ).grid(row=3, column=0, sticky="w")
@@ -591,16 +688,23 @@ class App:
             opt, variable=self.raw_var,
             text="改压缩方式为不压缩：用于模组压缩方式和游戏不一致导致卡加载"
                  "（包会变大）"
+        ).grid(row=7, column=0, sticky="w")
+
+        self.fixnames_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opt, variable=self.fixnames_var,
+            text="自动改名修复：补 _P 后缀 / 调 pakchunk 加载顺序，"
+                 "另出一份改好名的（原文件不动）"
         ).grid(row=6, column=0, sticky="w")
 
         self.genman_var = tk.BooleanVar(value=False)
         chk = ttk.Checkbutton(
             opt, variable=self.genman_var,
             text="先生成官方资产清单（首次使用必做；游戏更新后重新生成）")
-        chk.grid(row=7, column=0, sticky="w")
+        chk.grid(row=8, column=0, sticky="w")
         self.game_var = tk.StringVar(value="游戏目录识别中…")
         ttk.Label(opt, textvariable=self.game_var,
-                  foreground="#666").grid(row=8, column=0, sticky="w", pady=(4, 0))
+                  foreground="#666").grid(row=9, column=0, sticky="w", pady=(4, 0))
 
         # ---- 按钮 ----
         bar = ttk.Frame(root, padding=(14, 6))
@@ -648,6 +752,18 @@ class App:
 
         self.say("欢迎使用。请先点「选择文件夹」选择你的模组目录。")
 
+        # ---- 尺寸再定一次：内容需要多高就给多高（屏幕装不下才压缩） ----
+        #   高度按内容算（高 DPI 下同样的界面要高三分之一），
+        #   宽度不跟着算 —— 日志框的「默认宽度」会把窗口撑宽，而不是内容需要。
+        try:
+            root.update_idletasks()
+            h2 = max(h, root.winfo_reqheight())
+            h2 = max(480, min(h2, sh - 80))
+            if h2 != h:
+                root.geometry(f"{w}x{h2}")
+        except Exception:
+            pass          # 尺寸算不出来也不该影响使用
+
         # ---- 自动找游戏 + 判断清单新旧（关键：游戏一更新，清单就过期）----
         m, how = find_manifest()
         self.game_paks = self._detect_game()
@@ -681,6 +797,8 @@ class App:
             self.raw_var.set(bool(self.cfg["repack_raw"]))
         if "assess_first" in self.cfg:
             self.assess_var.set(bool(self.cfg["assess_first"]))
+        if "fix_names" in self.cfg:
+            self.fixnames_var.set(bool(self.cfg["fix_names"]))
         if autostart and last and os.path.isdir(last):
             self.root.after(400, self.start)
 
@@ -839,7 +957,8 @@ class App:
                          "strip_modified": bool(self.strip_modified_var.get()),
                          "health_only": bool(self.health_var.get()),
                          "repack_raw": bool(self.raw_var.get()),
-                         "assess_first": bool(self.assess_var.get())})
+                         "assess_first": bool(self.assess_var.get()),
+                         "fix_names": bool(self.fixnames_var.get())})
         save_config(self.cfg)
 
         self.running = True
@@ -864,7 +983,8 @@ class App:
                       bool(self.strip_modified_var.get()),
                       bool(self.health_var.get()),
                       bool(self.raw_var.get()),
-                      bool(self.assess_var.get()), game_paks, self.q),
+                      bool(self.assess_var.get()),
+                      bool(self.fixnames_var.get()), game_paks, self.q),
                 daemon=True)
             self.proc.start()
         except Exception as ex:
@@ -953,6 +1073,9 @@ class App:
 
         self.outdir = info.get("outdir") or self.outdir
         good = sum(v for k, v in b.items() if k != "无法处理")
+        n_fix = int(info.get("renamed", 0) or 0)
+        fix_line = (f"\n  · {n_fix} 个做了「自动改名修复」，改好名的文件在输出目录里\n"
+                    f"    （原文件没动）" if n_fix else "")
         if getattr(self, "_health_mode", False):
             n_err = sum(1 for s in info.get("summary", []) if s.get("problems"))
             msg = (f"体检完成。\n\n"
@@ -970,7 +1093,8 @@ class App:
                    f"  · {good - skipped} 个转换了，产物在：\n{self.outdir}\n"
                    f"  · {skipped} 个诊断判定【不需要转换】，已跳过、"
                    f"没有生成文件\n"
-                   f"    （它们原样用就行，转了反而可能变糟）\n\n"
+                   f"    （它们原样用就行，转了反而可能变糟）\n"
+                   f"{fix_line}\n"
                    f"注意：原文件没有被修改。")
             if b.get("无法处理"):
                 msg += f"\n\n有 {b['无法处理']} 个 pak 无法处理，请看日志。"
@@ -979,7 +1103,7 @@ class App:
             return
         msg = (f"转换完成。\n\n"
                f"共 {info.get('total', 0)} 个 pak，成功处理 {good} 个。\n"
-               f"输出目录：\n{self.outdir}\n\n"
+               f"输出目录：\n{self.outdir}\n{fix_line}\n\n"
                f"注意：原文件没有被修改。确认没问题后再用 converted 里的文件替换。")
         if b.get("无法处理"):
             msg += f"\n\n有 {b['无法处理']} 个 pak 无法处理，请看日志。"
@@ -1109,7 +1233,7 @@ def _selftest(moddir: str, verify: bool = False) -> int:
     q = ctx.Queue()
     proc = ctx.Process(target=_worker,
                        args=(moddir, outdir, man, verify, False, False, False,
-                             False, False, False, None, q),
+                             False, False, False, False, None, q),
                        daemon=True)
     proc.start()
 

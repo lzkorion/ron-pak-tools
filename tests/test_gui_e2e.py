@@ -74,6 +74,7 @@ def main():
         app._apply_dir(moddir)
         app.verify_var.set(False)      # 测试求快
         app.genman_var.set(False)      # 用已有的合成清单
+        app.fixnames_var.set(True)     # 顺带验证「自动改名修复」
         check(app.path_var.get() == os.path.normpath(moddir),
               f"路径已显示：{app.path_var.get()}")
         check(app.outdir.endswith("converted"), "输出目录为 converted")
@@ -115,11 +116,19 @@ def main():
         out = os.path.join(moddir, "converted")
         check(os.path.isdir(out), "输出目录已创建")
         produced = sorted(os.listdir(out)) if os.path.isdir(out) else []
-        check("SyntheticMod_P.pak" in produced, f"产物已生成（{produced}）")
+        # 「自动改名修复」已勾选：SyntheticMod_P.pak 解析不出 pakchunk 号，
+        # 产物应被补上 pakchunk9999- 前缀
+        fixed_name = "pakchunk9999-SyntheticMod_P.pak"
+        check(fixed_name in produced, f"产物已按新名字生成（{produced}）")
+        check("SyntheticMod_P.pak" not in produced,
+              "旧名字没有残留（不留两份让人不知道用哪个）")
         check("Broken_P.pak" not in produced, "坏文件没有产出垃圾 pak")
+        check(not any("Broken" in p for p in produced),
+              "坏文件也没有被改成「看着像修好了」的副本")
+        check("自动改名修复" in log, "日志说明了改名动作")
 
         import pakfmt as P
-        pk = P.read_pak(os.path.join(out, "SyntheticMod_P.pak"))
+        pk = P.read_pak(os.path.join(out, fixed_name))
         paths = set(pk.all_paths())
         # 冲突型：应被剥离
         for rel in FX.CONFLICT_ASSETS:

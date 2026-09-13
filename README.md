@@ -41,6 +41,8 @@ Ready or Not 每次大更新，都会**把一部分热门模组的内容直接�
 |---|---|
 | **批量转换** | 整个文件夹丢进去，自动逐个检测并转换 |
 | **智能判定** | 只剥「蓝图/逻辑/数据」这类会冲突的；贴图/模型/音频等**资源替换一律保留** |
+| **先诊断再转换** | 先给结论（可以转换 / 不用转换 / 不建议转换 / 转换也修不好），只转该转的 |
+| **自动改名修复** | 补 `_P` 后缀、调 pakchunk 加载顺序，出一份改好名的副本（原文件不动） |
 | **重新打包** | 自己实现 pak v11/v12 写入器，压缩数据原样搬运，保留条目**逐字节不变** |
 | **官方校验** | 可选调用本机 UnrealPak 做 `-List` / `-Test` 复核 |
 | **图形界面** | 双击 exe 就能用，不需要命令行 |
@@ -80,6 +82,12 @@ python tools/ronconvert.py "C:\你的模组文件夹" --verify
 
 # 先看诊断，不写文件
 python tools/ronconvert.py "C:\你的模组文件夹" --dry-run
+
+# 只回答「这是什么类型的 mod、能不能改、要不要改名」（不写文件）
+python tools/ronhealth.py "C:\你的模组文件夹" --assess
+
+# 顺手把该改名的模组复制一份改好名的出来（原文件不动）
+python tools/ronhealth.py "C:\你的模组文件夹" --fix-names "C:\fix"
 ```
 
 > 清单必须是**全路径**（`readyornot/content/blueprints/...`）。
@@ -224,6 +232,61 @@ v1.1.0 起默认**只剥能证明是照抄官方的**，其余一律保留。要
    ── 结论：没发现结构性问题
 ```
 
+### 自动改名修复：文件名不对，转换再多次也没用（v1.6.0）
+
+「装了没效果」的模组里，很大一部分根本不是内容问题，而是**文件名问题**。
+勾上界面里的「**自动改名修复**」（或命令行 `--fix-names <输出目录>`），
+工具会算出这个 pak 该叫什么，并**复制**一份改好名的给你 —— **原文件绝不动**。
+
+三条确定性规则（只改有把握的，其余一律不碰）：
+
+| 情况 | 改成 | 依据 |
+|---|---|---|
+| 文件名不是 `_P.pak` 结尾 | 补上 `_P` | 官方指南点名的头号错误：主线 pak 存在时，补丁 pak 没有 `_P` 很可能根本不加载 |
+| 解析不出 `pakchunk<N>-` 前缀 | 补 `pakchunk9999-` | 没有这个前缀就没有加载顺序可言 |
+| 同一路径被 **pakchunk 号更大**的模组压着 | 把号提到 `最大号 + 1` | 同一个路径，数字大的赢 —— 现在你赢 |
+
+```
+MyMod.pak  ->  pakchunk10000-MyMod_P.pak
+  · 文件名不是 _P.pak 结尾 —— 很可能根本不加载（可以用「自动改名修复」补上）
+  · 被 pakchunk9999-Mods_wound_P.pak 覆盖（它 pakchunk9999 > 你的 pakchunk0）
+```
+
+两条底线：**读不动的 pak 不会生成改名副本**（免得看起来像被修好了）；
+目标名已存在时**不覆盖**，改成 `名字(1).pak` 另存。
+
+### 模组类型识别：这个 mod 到底在改什么？（v1.6.0）
+
+诊断会先告诉你它属于哪几类（可以多标签），并说明**转换对它有没有用**：
+
+| 类型 | 说明 |
+|---|---|
+| 地图 | 自定义地图必须作者重新烤，重打包改变不了任何东西 |
+| 贴图替换 | 覆盖官方贴图是正常 mod 行为，没有可剥的东西 |
+| 材质替换 | 覆盖官方材质是正常 mod 行为，没有可剥的东西 |
+| 网格替换 | 覆盖官方网格是正常 mod 行为，没有可剥的东西 |
+| 蓝图/逻辑 | 最容易因为游戏更新而崩溃 —— 但也最可能是模组的功能本身 |
+| 数据表 | 模组改数值的主要手段，剥了就等于删功能 |
+| 音频替换 / 动画 | 覆盖官方资源是正常 mod 行为 |
+| 纯新增内容 | 全是游戏里没有的新路径，没有可剥的东西 |
+
+```
+── pakchunk9999-Mods_wound_P.pak
+   类型：贴图替换
+        · 贴图替换：覆盖官方贴图是正常 mod 行为，没有可剥的东西
+   ── 诊断结论：【不用转换】没有可剥的内容，原样用就行
+```
+
+命令行：
+
+```powershell
+# 只诊断：这个 mod 是什么类型、能不能改、要不要改名
+python tools/ronhealth.py "C:\你的模组文件夹" --assess
+
+# 诊断 + 把该改名的复制到 fix 目录（原文件不动）
+python tools/ronhealth.py "C:\你的模组文件夹" --fix-names "C:\你的模组文件夹\fixed"
+```
+
 ### 清单生成：现在只要几秒
 
 v1.0.0 生成清单要把每个本体 pak 整份读进内存（`pakchunk0` 有 24 GB），
@@ -287,6 +350,7 @@ ron-pak-tools/
 ├── tools/
 │   ├── pakfmt.py         ★ pak v11/v12 读写库（核心）
 │   ├── ronconvert.py     ★ 检测 + 转换逻辑
+│   ├── ronhealth.py      ★ 体检 / 诊断 / 模组类型 / 自动改名修复
 │   ├── ronverify.py      对比原版/转换后（孤儿 / 缺件 / 挂载点）
 │   ├── ronstrip.py       精确剥离（--keep / --drop）
 │   ├── roncheck.py       批量体检
@@ -324,6 +388,8 @@ and repacks the mod without the conflicting parts.
 |---|---|
 | **Batch convert** | Point it at a folder; every `.pak` is diagnosed and converted |
 | **Conservative stripping** | Only strips blueprint/logic/data assets that conflict. Texture/model/audio replacements are **always kept** |
+| **Diagnose before converting** | Verdict first (convert / no need / not advisable / unfixable), then it only converts what is worth converting |
+| **Rename repair** | Appends `_P`, fixes the pakchunk load order, writes a correctly named copy (originals untouched) |
 | **Path-exact matching** | "Same file name" is **not** "same asset". Only a full path match counts (see below) |
 | **Repacking** | Own pak v11/v12 writer. Compressed bytes are copied verbatim, so kept entries stay **byte-identical** |
 | **Verification** | Optionally calls your local UnrealPak for `-List` / `-Test` |
@@ -414,6 +480,46 @@ Measured on four real mods (v1.1.0 defaults):
 
 All four are now emitted **byte-identical to the source pak**.
 
+### Rename repair: a wrong file name beats any amount of converting (v1.6.0)
+
+A large share of "installed it, nothing happens" mods are not a content problem
+at all — they are a **file name** problem. Tick "**自动改名修复**"
+(CLI: `--fix-names <outdir>`) and the tool works out what the pak should be
+called and writes a **copy** under that name. **Your original file is never touched.**
+
+Three deterministic rules — anything else is left alone:
+
+| Situation | Becomes | Why |
+|---|---|---|
+| Name does not end in `_P.pak` | `_P` is appended | The #1 mistake the [official guide](https://unofficial-modding-guide.com/posts/thebasics/) calls out: with a main-game pak present, a patch pak without `_P` often does not load at all |
+| No `pakchunk<N>-` prefix can be parsed | `pakchunk9999-` is prepended | Without it there is no load order to speak of |
+| The same paths are overridden by a mod with a **higher pakchunk number** | the number is raised to `max + 1` | For identical paths the higher number wins — now you win |
+
+```
+MyMod.pak  ->  pakchunk10000-MyMod_P.pak
+  · file name does not end in _P.pak - it most likely never loads
+  · overridden by pakchunk9999-Mods_wound_P.pak (9999 > your 0)
+```
+
+Two hard limits: an **unreadable pak never gets a renamed copy** (so it cannot
+look like it was fixed), and an existing target name is **never overwritten** —
+the copy becomes `name(1).pak` instead.
+
+### Mod type detection: what is this mod actually changing? (v1.6.0)
+
+The diagnosis first tells you which categories it falls into (multiple allowed)
+and whether converting it can help at all:
+
+| Type | Note |
+|---|---|
+| Map | A custom map must be re-cooked by its author; repacking changes nothing |
+| Texture replacement | Overriding official textures is normal mod behaviour; nothing to strip |
+| Material / Mesh replacement | Overriding official assets is normal; nothing to strip |
+| Blueprint / logic | Most likely to break after a game update — but also most likely to *be* the feature |
+| Data table | The usual way mods change values; stripping it deletes the feature |
+| Audio / animation replacement | Overriding official assets is normal |
+| Purely additive content | All new paths the game never had; nothing to strip |
+
 ### Manifest generation is now fast
 
 v1.0.0 read each base-game pak fully into memory (`pakchunk0` is 24 GB), which was
@@ -434,6 +540,12 @@ python tools/ronconvert.py "C:\your\mod\folder" --verify
 
 # Dry run: diagnose only
 python tools/ronconvert.py "C:\your\mod\folder" --dry-run
+
+# What kind of mod is this, can it be fixed, does it need renaming? (writes nothing)
+python tools/ronhealth.py "C:\your\mod\folder" --assess
+
+# Copy the ones that need it under a corrected name (originals untouched)
+python tools/ronhealth.py "C:\your\mod\folder" --fix-names "C:\fix"
 ```
 
 GUI: double-click `RoNPakTools.exe`, generate the official asset manifest once

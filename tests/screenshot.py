@@ -17,6 +17,18 @@ u32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
 user32 = u32
 
+# ★ 先把本进程声明成 DPI 感知的。
+#   不声明的话 Windows 会把坐标「虚拟化」：显示缩放 133% 时，
+#   GetWindowRect 报回来的是 996 宽的虚拟矩形，而窗口实际有 1300+ 物理像素，
+#   BitBlt 就只抓到窗口左边一块 —— 截出来的图右边和下面都是断的。
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)      # per-monitor v2
+except Exception:
+    try:
+        u32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 SW_RESTORE = 9
 HWND_TOP = 0
 SWP_NOSIZE = 0x0001
@@ -159,8 +171,16 @@ def main() -> int:
         print(f"   hwnd={h} title={t!r}")
 
     hwnd = next((h for h, t in cands if "Pak Tools" in t), None)
-    if hwnd is None:
-        hwnd = next((h for h, t in cands if t), None)
+    # 弹窗（messagebox）的标题也是 "RoN Pak Tools"，所以按标题挑会挑到弹窗。
+    # 取【面积最大】的那个才是主窗口；弹窗通常居中盖在主窗口上，一起被截进去。
+    if cands:
+        def area(h):
+            r = wt.RECT()
+            u32.GetWindowRect(h, ctypes.byref(r))
+            return (r.right - r.left) * (r.bottom - r.top)
+        biggest = max(cands, key=lambda c: area(c[0]))[0]
+        if hwnd is None or area(biggest) > area(hwnd):
+            hwnd = biggest
     if hwnd is None:
         print("NO_WINDOW")
         return 1

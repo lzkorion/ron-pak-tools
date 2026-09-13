@@ -210,6 +210,116 @@ def main():
     check(r16.get("is_map") is True, "识别为地图模组")
     check(find(r16, "地图模组") is not None, "给出地图模组的提示", titles(r16))
 
+    print("\n15) 模组类型识别（这个 mod 到底在改什么）")
+    # 直接喂路径，验证每条规则（over = 真的对上官方路径的那批）
+    tx = ["ReadyOrNot/Content/Textures/Blood/T_X.uasset"]
+    check(RH.classify_mod(tx, tx) == ["贴图替换"],
+          f"贴图目录 -> 贴图替换（{RH.classify_mod(tx, tx)}）")
+    check(RH.classify_mod(["Mods/A/T_Lone.uasset"], ["Mods/A/T_Lone.uasset"])
+          == ["贴图替换"], "T_ 开头的文件名也算贴图")
+    bpd = ["ReadyOrNot/Content/Blueprints/X/BP_Y.uasset",
+           "ReadyOrNot/Content/Data/SomeDataTable.uasset"]
+    check(RH.classify_mod(bpd, bpd) == ["蓝图/逻辑", "数据表"],
+          f"蓝图 + 数据表（{RH.classify_mod(bpd, bpd)}）")
+    msh = ["ReadyOrNot/Content/Meshes/SK_Body.uasset"]
+    check(RH.classify_mod(msh, msh) == ["网格替换"], "网格目录 -> 网格替换")
+    mat = ["ReadyOrNot/Content/Materials/MI_Blood.uasset"]
+    check(RH.classify_mod(mat, mat) == ["材质替换"], "材质目录 -> 材质替换")
+    mp2 = ["ReadyOrNot/Content/Mods/MyMap/MyLevel.umap"]
+    check(RH.classify_mod(mp2, mp2) == ["地图"], "有 .umap -> 地图")
+    check(RH.classify_mod(["Mods/A/New.uasset"], []) == ["纯新增内容"],
+          "一条都对不上官方 -> 纯新增内容")
+    check(RH.classify_mod(mp2, []) == ["地图", "纯新增内容"],
+          f"没覆盖官方的地图 -> 两个标签（{RH.classify_mod(mp2, [])}）")
+    check(RH.classify_mod([], []) == ["纯新增内容"], "空 pak 也不崩")
+
+    print("   和 assess() 串起来：真实合成 pak 的类型")
+    a_kind = RH.assess(good, off, peers=[])
+    check("贴图替换" in a_kind["kinds"] and "蓝图/逻辑" in a_kind["kinds"],
+          f"合成模组识别出多类型（{a_kind['kinds']}）")
+    check(bool(a_kind["kind_note"]), f"每类都有说明（{a_kind['kind_note'][:20]}…）")
+    a_new = RH.assess(newonly, off, peers=[])
+    check(a_new["kinds"] == ["纯新增内容"],
+          f"纯新增内容模组（{a_new['kinds']}）")
+    a_map = RH.assess(mp, off, peers=[])
+    check("地图" in a_map["kinds"], f"地图模组（{a_map['kinds']}）")
+
+    print("\n16) 自动改名修复：该改成什么名")
+    r1 = RH.plan_rename(os.path.join(WORK, "MyMod.pak"))
+    check(r1["needed"] and r1["new_name"] == "pakchunk9999-MyMod_P.pak",
+          f"没后缀没前缀 -> 全补上（{r1['new_name']}）")
+    check(len(r1["reasons"]) == 2, f"两条理由（{len(r1['reasons'])}）")
+    r2 = RH.plan_rename(os.path.join(WORK, "pakchunk10-MyMod.pak"))
+    check(r2["new_name"] == "pakchunk10-MyMod_P.pak" and len(r2["reasons"]) == 1,
+          f"只缺 _P 后缀（{r2['new_name']}）")
+    r3 = RH.plan_rename(os.path.join(WORK, "pakchunk10-MyMod_P.pak"),
+                        conflict_chunks=[99])
+    check(r3["new_name"] == "pakchunk100-MyMod_P.pak",
+          f"被 pakchunk99 压着 -> 提到 100（{r3['new_name']}）")
+    r4 = RH.plan_rename(os.path.join(WORK, "MyMod.pak"), conflict_chunks=[9999])
+    check(r4["new_name"] == "pakchunk10000-MyMod_P.pak",
+          f"没前缀 + 被压着 -> 一次到位（{r4['new_name']}）")
+    r5 = RH.plan_rename(os.path.join(WORK, "pakchunk9999-Mods_Ok_P.pak"))
+    check(not r5["needed"] and r5["new_name"] == "pakchunk9999-Mods_Ok_P.pak",
+          "本来就对的名字绝不动")
+    r6 = RH.plan_rename(os.path.join(WORK, "pakchunk9999-Mods_Ok_P.pak"),
+                        conflict_chunks=[9998])
+    check(not r6["needed"], "对方 chunk 更小 -> 不用改（你本来就赢）")
+
+    print("   改名方案在「诊断」和「转换」两处必须一致")
+    prn = RH.rename_plan_for(mine, peers=peers)          # peers=chunk 99999
+    a_rn = RH.assess(mine, off, peers=peers)["rename"]
+    check(prn["new_name"] == a_rn["new_name"]
+          and prn["needed"] == a_rn["needed"],
+          f"一致（{prn['new_name']}）")
+    check(prn["new_name"] == "pakchunk100000-Mods_Mine_P.pak",
+          f"被 99999 压着 -> 提到 100000（{prn['new_name']}）")
+    check(prn["readable"] is True, "好文件 readable=True")
+
+    print("\n17) 改名修复只做该做的事")
+    a_ok = RH.assess(good, off, peers=[])
+    check(RH.should_fix_name(a_ok) is False, "名字本来就对 -> 不做")
+    a_nop = RH.assess(nop, off, peers=[])                 # pakchunk99-Mods_NoPatch.pak
+    check(a_nop["verdict"] == "blocked" and RH.should_fix_name(a_nop),
+          f"结构有硬伤但名字能修 -> 仍然改名（{a_nop['rename']['new_name']}）")
+    a_bad = RH.assess(bad_file, off, peers=[])
+    check(RH.should_fix_name(a_bad) is False,
+          "读不动的文件 -> 不生成改名副本（免得像被修好了）")
+    check(RH.rename_plan_for(bad_file, peers=[])["readable"] is False,
+          "坏文件 readable=False")
+
+    print("   apply_rename：复制副本，绝不动原文件、绝不覆盖")
+    src_h = os.path.join(WORK, "pakchunk99-Mods_NoPatch.pak")
+    before = os.path.getsize(nop)
+    outd = os.path.join(WORK, "fixed")
+    p1 = RH.apply_rename(nop, "pakchunk9999-Mods_NoPatch_P.pak", outd)
+    check(os.path.basename(p1) == "pakchunk9999-Mods_NoPatch_P.pak",
+          f"副本名对（{os.path.basename(p1)}）")
+    check(os.path.isfile(nop) and os.path.getsize(nop) == before,
+          "原文件还在、没变")
+    check(open(p1, "rb").read() == open(nop, "rb").read(),
+          "副本内容与原文件逐字节一致")
+    p2 = RH.apply_rename(nop, "pakchunk9999-Mods_NoPatch_P.pak", outd)
+    check(os.path.basename(p2) == "pakchunk9999-Mods_NoPatch_P(1).pak",
+          f"同名不覆盖，改成 (1)（{os.path.basename(p2)}）")
+    p3 = RH.apply_rename(nop, os.path.basename(nop), os.path.dirname(nop))
+    check(p3 == nop, "目标就是自己 -> 原样返回，不复制")
+    check(sorted(os.listdir(outd)) == [
+        "pakchunk9999-Mods_NoPatch_P(1).pak",
+        "pakchunk9999-Mods_NoPatch_P.pak"],
+        f"输出目录只有这两份（{sorted(os.listdir(outd))}）")
+
+    print("\n18) --assess --json 的字段稳定（GUI / 脚本依赖它）")
+    import io
+    buf = io.StringIO()
+    RH.render_assess(a_kind, log=buf.write)
+    txt = buf.getvalue()
+    check("类型：" in txt and "贴图替换" in txt, "诊断打印里含模组类型")
+    buf2 = io.StringIO()
+    RH.render_assess(a_bad, log=buf2.write)
+    check("改名救不了坏文件" in buf2.getvalue(),
+          f"坏文件不会假称「改名就能修」（{buf2.getvalue().strip()[-30:]}）")
+
     print(f"\n=== 体检功能测试 {'PASS' if not fails else 'FAIL ' + str(fails)} ===")
     return 0 if not fails else 1
 

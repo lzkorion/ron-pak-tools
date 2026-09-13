@@ -1,10 +1,10 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """把打包好的 exe 发到 GitHub Releases。
 
 用法（token 只用于这一次，不会写进任何文件）：
     set GITHUB_TOKEN=ghp_xxxx
-    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.5.0
+    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.6.0
 
 会做：
   1. 发布前合规检查（exe 内不得含游戏数据 / Epic 工具）
@@ -97,7 +97,7 @@ game installation. It is written only on your machine and never uploaded.
 - 可选调用你本机的 UnrealPak 做 `-List` / `-Test` 复核
 - **原始模组文件不会被修改**，结果输出到 `converted` 子目录
 
-## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.5.0
+## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.6.0
 
 v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常多写一层
 `ReadyOrNot/`（挂载点里已经有了），于是和官方永远「同路径匹配不上」、
@@ -129,6 +129,27 @@ v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常
 
 已用四个真实模组端到端复核：官方 `UnrealPak -List` / `-Test` 全部 rc=0，
 孤儿 0、缺件 0、新增 0、挂载点不变。
+
+### v1.6.0 新增（自动改名修复 + 模组类型识别）
+
+- **🩹 自动改名修复（勾界面上的「自动改名修复」，或命令行 `--fix-names <目录>`）**
+  装了没效果的模组里，很大一部分其实是**文件名不对**。工具现在会算出该叫什么，
+  并**复制**一份改好名的给你（**原文件绝不动**）：
+  - 文件名不是 `_P.pak` 结尾 → 补上（[官方指南](https://unofficial-modding-guide.com/posts/thebasics/)
+    点名的头号错误：主线 pak 存在时，补丁 pak 没有 `_P` 很可能根本不加载）
+  - 文件名解析不出 `pakchunk<N>-` → 补 `pakchunk9999-`（否则加载顺序无从谈起）
+  - **同一路径被 pakchunk 号更大的模组压着** → 把号提到 `最大号 + 1`，
+    让你真的赢（而不是「装了但被别的模组盖掉」）
+  同号、没冲突的一律不动 —— 只做确定性的事。
+  读不动的 pak **不会**生成改名副本（免得看起来像被修好了）。
+
+- **🔍 模组类型识别**：诊断时直接告诉你这个 mod 到底在改什么 ——
+  地图 / 贴图替换 / 材质替换 / 网格替换 / 蓝图逻辑 / 数据表 / 音频替换 /
+  动画 / 纯新增内容，并说明**转换对它有没有用**
+  （例：贴图替换没有可剥的东西；自定义地图必须作者重新烤）。
+
+- 命令行新增：`python tools/ronhealth.py "<模组目录>" --assess`（只诊断）
+  和 `--fix-names "<输出目录>"`（诊断 + 出改名副本）。
 
 ### v1.5.0 新增（体检模式 + 两个硬 bug 修复）
 
@@ -225,7 +246,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="发布 exe 到 GitHub Releases")
     ap.add_argument("--user", required=True)
     ap.add_argument("--repo", default="ron-pak-tools")
-    ap.add_argument("--tag", default="v1.5.0")
+    ap.add_argument("--tag", default="v1.6.0")
     ap.add_argument("--name", default=None, help="Release 标题（默认同 tag）")
     ap.add_argument("--exe", default=os.path.join("dist", EXE_NAME))
     ap.add_argument("--dry-run", action="store_true")
