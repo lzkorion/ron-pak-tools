@@ -1,0 +1,42 @@
+# 构建产物
+build/
+dist/
+*.spec
+
+# ── 绝不提交：游戏派生数据 / 第三方内容 / Epic 工具 ──
+# （这些含游戏资产名或他人作品，公开仓库里不能有）
+manifest_local.json
+game_manifest.json
+game_manifest_full.json
+game_assets_uasset.txt
+mod_assets.json
+mod_assets_report.txt
+visceral_paths.json
+ron_mods_report.json
+samples/
+*.pak
+*.sig
+UnrealPak.exe
+oo2core.dll
+*.ucas
+*.utoc
+
+# 运行期产物
+converted/
+tests/_work/
+ronconvert_gui.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.bak
+*.orig
