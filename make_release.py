@@ -4,7 +4,7 @@
 
 用法（token 只用于这一次，不会写进任何文件）：
     set GITHUB_TOKEN=ghp_xxxx
-    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.7.0
+    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.8.0
 
 会做：
   1. 发布前合规检查（exe 内不得含游戏数据 / Epic 工具）
@@ -97,7 +97,7 @@ game installation. It is written only on your machine and never uploaded.
 - 可选调用你本机的 UnrealPak 做 `-List` / `-Test` 复核
 - **原始模组文件不会被修改**，结果输出到 `converted` 子目录
 
-## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.7.0
+## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.8.0
 
 v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常多写一层
 `ReadyOrNot/`（挂载点里已经有了），于是和官方永远「同路径匹配不上」、
@@ -129,6 +129,35 @@ v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常
 
 已用四个真实模组端到端复核：官方 `UnrealPak -List` / `-Test` 全部 rc=0，
 孤儿 0、缺件 0、新增 0、挂载点不变。
+
+### v1.8.0 新增（自动判断「这个模组能不能改」）
+
+以前只回答「该不该转换」，现在诊断的最后会直接给一句**可改性结论** ——
+本工具能不能改它、值不值得改、改了会不会更糟：
+
+| 结论 | 意思 |
+|---|---|
+| **可以改** | 有明确、安全、值得做的事（下面会逐条列出「能做什么」） |
+| **不用改** | 没有可改的地方 —— 原样用就行 |
+| **别改** | 动手会毁掉它的功能（官方同路径的资产全是模组自己改过的） |
+| **改不了** | 问题在本工具能力之外（地图要作者重烤、引用断了要作者修、pak 读不动…） |
+
+几条刻意定死的规矩：
+
+- **能用的模组一律不劝人动。**「不用改 / 改不了 / 别改」都会附一句
+  「既然现在能用，就别动它 —— 不做事永远是安全的选项」。
+- **有硬伤就不说「可以改」。**实测 Hospital 地图模组：压缩方式确实不一致、
+  也确实能改，但**改完照样闪退**（我们真做过这个实验）——
+  所以它现在被判为「改不了」，只是如实附上「能做什么：改压缩方式（做了也救不了它）」。
+- **「改不了」会分清楚到底卡在哪**：是地图要重烤、是引用断了、还是 pak 读不动，
+  一条条写明「工具做不了什么」，而不是含糊地说一句「有问题」。
+
+实测 8 个装机模组：**7 个「改不了」+ 1 个「别改」（AK74M）**，
+**没有一个「可以改」** —— 意思是它们现在这样就是最好的，别动。
+
+- 命令行 `--assess` 现在**默认连引用分析一起做**（可改性判断要用它），
+  `--no-refs` 可以关掉。
+- GUI 的「引用分析」也改成**默认勾选**。
 
 ### v1.7.0 新增（引用分析：它引用的资产，游戏里还在不在？）
 
@@ -287,7 +316,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="发布 exe 到 GitHub Releases")
     ap.add_argument("--user", required=True)
     ap.add_argument("--repo", default="ron-pak-tools")
-    ap.add_argument("--tag", default="v1.7.0")
+    ap.add_argument("--tag", default="v1.8.0")
     ap.add_argument("--name", default=None, help="Release 标题（默认同 tag）")
     ap.add_argument("--exe", default=os.path.join("dist", EXE_NAME))
     ap.add_argument("--dry-run", action="store_true")

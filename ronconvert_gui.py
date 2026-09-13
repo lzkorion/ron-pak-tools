@@ -425,6 +425,8 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                 return newp, _os.path.basename(newp)
 
             skip: set[str] = set()
+            n_fixable = 0
+            mod_buckets: dict[str, int] = {}
             if assess_first and RH is not None:
                 log("先诊断：逐个判断「能不能改、值不值得改」，只转该转的")
                 log("=" * 70)
@@ -442,12 +444,22 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                     fix_cache[src] = a.get("rename") or {}   # 改名建议复用诊断结果
                     RH.render_assess(a, log=log)
                     ares.append(a)
+                    if (a.get("modify") or {}).get("code") == "can_fix":
+                        n_fixable += 1
+                    mlabel = (a.get("modify") or {}).get("label")
+                    if mlabel:
+                        mod_buckets[mlabel] = mod_buckets.get(mlabel, 0) + 1
                     if not a["should_convert"]:
                         skip.add(src)
                 RH.print_assess_table(ares, log=log)
                 log("")
                 log(f"诊断完毕：{total - len(skip)} 个建议转换，"
                     f"{len(skip)} 个跳过（转了也没用，甚至更糟）")
+                if n_fixable:
+                    log(f"其中 {n_fixable} 个「可以改」—— 想动手的话看上面的"
+                        f"「能做什么」；其余的不用动。")
+                else:
+                    log("没有「可以改」的 —— 这些模组本工具帮不上忙（原样用就行）。")
                 log("=" * 70)
                 if not skip:
                     log("（没有需要跳过的）")
@@ -575,6 +587,7 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
         q.put(("done", {"outdir": outdir, "total": total,
                         "buckets": buckets, "summary": summary,
                         "renamed": n_renamed,
+                        "fixable": n_fixable, "modify": mod_buckets,
                         "seconds": time.time() - t_all}))
     except Exception as ex:
         try:
@@ -696,11 +709,11 @@ class App:
                  "只转该转的"
         ).grid(row=5, column=0, sticky="w")
 
-        self.refs_var = tk.BooleanVar(value=False)
+        self.refs_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             opt, variable=self.refs_var,
-            text="引用分析：读模组资产里记的包路径，查游戏更新后哪些引用已断"
-                 "（较慢；压缩资产需要本机有 oo2core.dll / 装过 UE）"
+            text="引用分析（默认开）：读资产里记的包路径，查引用断没断 ——"
+                 "「能不能改」要靠它判断（压缩资产需要本机有 oo2core.dll / 装过 UE）"
         ).grid(row=6, column=0, sticky="w")
 
         self.fixnames_var = tk.BooleanVar(value=False)
@@ -1101,6 +1114,18 @@ class App:
         n_fix = int(info.get("renamed", 0) or 0)
         fix_line = (f"\n  · {n_fix} 个做了「自动改名修复」，改好名的文件在输出目录里\n"
                     f"    （原文件没动）" if n_fix else "")
+        # 可改性一行：告诉用户「有没有值得动手的」，没有就明确说别动
+        mod = info.get("modify") or {}
+        n_canfix = int(info.get("fixable", 0) or 0)
+        mod_line = ""
+        if mod:
+            parts = "、".join(f"{k} {v}" for k, v in mod.items())
+            mod_line = f"\n可改性：{parts}\n"
+            if n_canfix:
+                mod_line += ("  （「可以改」的那些看日志里的「能做什么」；"
+                             "其余的原样用就行）")
+            else:
+                mod_line += "  （没有值得动手的模组 —— 它们原样用就行）"
         if getattr(self, "_health_mode", False):
             n_err = sum(1 for s in info.get("summary", []) if s.get("problems"))
             msg = (f"体检完成。\n\n"
@@ -1119,7 +1144,7 @@ class App:
                    f"  · {skipped} 个诊断判定【不需要转换】，已跳过、"
                    f"没有生成文件\n"
                    f"    （它们原样用就行，转了反而可能变糟）\n"
-                   f"{fix_line}\n"
+                   f"{fix_line}{mod_line}\n"
                    f"注意：原文件没有被修改。")
             if b.get("无法处理"):
                 msg += f"\n\n有 {b['无法处理']} 个 pak 无法处理，请看日志。"
@@ -1128,7 +1153,7 @@ class App:
             return
         msg = (f"转换完成。\n\n"
                f"共 {info.get('total', 0)} 个 pak，成功处理 {good} 个。\n"
-               f"输出目录：\n{self.outdir}\n{fix_line}\n\n"
+               f"输出目录：\n{self.outdir}\n{fix_line}{mod_line}\n\n"
                f"注意：原文件没有被修改。确认没问题后再用 converted 里的文件替换。")
         if b.get("无法处理"):
             msg += f"\n\n有 {b['无法处理']} 个 pak 无法处理，请看日志。"

@@ -44,6 +44,7 @@ Ready or Not 每次大更新，都会**把一部分热门模组的内容直接�
 | **先诊断再转换** | 先给结论（可以转换 / 不用转换 / 不建议转换 / 转换也修不好），只转该转的 |
 | **自动改名修复** | 补 `_P` 后缀、调 pakchunk 加载顺序，出一份改好名的副本（原文件不动） |
 | **引用分析** | 读资产内部记的包路径，查出「引用的资产游戏更新后没了」并给出现在的名字 |
+| **可改性判定** | 直接回答「这个模组能不能改、值不值得改」，能用的模组不劝人动 |
 | **重新打包** | 自己实现 pak v11/v12 写入器，压缩数据原样搬运，保留条目**逐字节不变** |
 | **官方校验** | 可选调用本机 UnrealPak 做 `-List` / `-Test` 复核 |
 | **图形界面** | 双击 exe 就能用，不需要命令行 |
@@ -291,6 +292,29 @@ python tools/ronhealth.py "C:\你的模组文件夹" --assess
 python tools/ronhealth.py "C:\你的模组文件夹" --fix-names "C:\你的模组文件夹\fixed"
 ```
 
+### 「能不能改」：软件直接给结论（v1.8.0）
+
+每次诊断的最后一行是一句明确的可改性结论 —— 本工具能不能改它、值不值得改：
+
+| 结论 | 意思 | 你该做什么 |
+|---|---|---|
+| **可以改** | 有明确、安全、值得做的事 | 看下面「能做什么」逐条列的（剥几条 / 改名 / 改压缩方式） |
+| **不用改** | 没有可改的地方 | 原样用 |
+| **别改** | 动手会毁掉它的功能（官方同路径的资产全是它自己改过的） | 别动，现在能用就行 |
+| **改不了** | 问题在本工具能力之外 | 等模组作者更新，或换一个模组 |
+
+三条刻意定死的规矩：
+
+- **能用的模组不劝人动。**「不用改 / 改不了 / 别改」后面都会附一句
+  「既然现在能用，就别动它 —— 不做事永远是安全的选项」。
+- **有硬伤就不说「可以改」。**Hospital 地图模组：压缩方式确实不一致、也确实能改，
+  但**改完照样闪退**（这个实验我们做过）—— 所以它判「改不了」，
+  只如实附上「能做什么：改压缩方式（做了也救不了它）」。
+- **「改不了」要说清楚卡在哪**：地图要重烤 / 引用断了 / pak 读不动，一条条列出来。
+
+实测 8 个装机模组：**7 个「改不了」+ 1 个「别改」（AK74M），没有一个「可以改」**。
+换句话说：你现在这套模组，本工具帮不上忙，原样用就是最优解。
+
 ### 引用分析：它引用的资产，游戏里还在不在？（v1.7.0）
 
 「装了没效果 / 一闪退」的另一个大头是**引用断了**。RoN 模组是拿 UAssetGUI 直接改
@@ -433,6 +457,7 @@ and repacks the mod without the conflicting parts.
 | **Diagnose before converting** | Verdict first (convert / no need / not advisable / unfixable), then it only converts what is worth converting |
 | **Rename repair** | Appends `_P`, fixes the pakchunk load order, writes a correctly named copy (originals untouched) |
 | **Reference analysis** | Reads the package paths recorded inside assets and finds references the game update broke, suggesting the current name |
+| **Modifiability verdict** | Says plainly whether the tool can improve a mod, and refuses to recommend touching one that already works |
 | **Path-exact matching** | "Same file name" is **not** "same asset". Only a full path match counts (see below) |
 | **Repacking** | Own pak v11/v12 writer. Compressed bytes are copied verbatim, so kept entries stay **byte-identical** |
 | **Verification** | Optionally calls your local UnrealPak for `-List` / `-Test` |
@@ -562,6 +587,36 @@ and whether converting it can help at all:
 | Data table | The usual way mods change values; stripping it deletes the feature |
 | Audio / animation replacement | Overriding official assets is normal |
 | Purely additive content | All new paths the game never had; nothing to strip |
+
+### "Can it be modified?" - the tool answers it (v1.8.0)
+
+Every diagnosis now ends with an explicit modifiability verdict: can this tool
+change it, is it worth changing, and would changing it make things worse?
+
+| Verdict | Meaning |
+|---|---|
+| **Can be modified** | There is something concrete, safe and worthwhile to do (listed action by action) |
+| **No change needed** | Nothing to change - use it as is |
+| **Don't touch it** | Modifying would destroy it (every same-path official asset is the mod's own edit) |
+| **Cannot be fixed** | The problem is outside this tool's reach (a map must be re-cooked, broken references need the author, the pak is unreadable...) |
+
+Three rules are deliberately hard-coded:
+
+- **A working mod is never nagged into being changed.** Every "no change needed /
+  cannot be fixed / don't touch it" verdict adds: if it works today, leave it alone -
+  doing nothing is always the safe option.
+- **A hard defect never yields "can be modified".** The Hospital map mod: its
+  compression really does mismatch, and it really can be re-packed - but it **still
+  crashes afterwards** (we ran that experiment). It is therefore reported as
+  "cannot be fixed", with an honest note of what *could* be done and that it would
+  not help.
+- **"Cannot be fixed" always says what is blocking it** - re-cook needed, broken
+  references, unreadable pak.
+
+Measured on 8 installed mods: **7 "cannot be fixed" + 1 "don't touch it" (AK74M),
+none "can be modified"**. In other words: for this set, leaving everything alone is
+optimal. `--assess` now runs the reference analysis by default (the verdict needs
+it); `--no-refs` disables it.
 
 ### Reference analysis: are the assets it references still in the game? (v1.7.0)
 

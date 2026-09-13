@@ -320,6 +320,69 @@ def main():
     check("改名救不了坏文件" in buf2.getvalue(),
           f"坏文件不会假称「改名就能修」（{buf2.getvalue().strip()[-30:]}）")
 
+    print("\n19) 可改性：这个模组能不能改、值不值得改")
+    # 19a. 有照抄官方的资产 -> 可以改
+    m1 = RH.assess(good, off, peers=[])["modify"]
+    check(m1["code"] == "can_fix", f"有可剥的 -> 可以改（{m1['label']}）")
+    check(any("剥掉" in x for x in m1["actions"]),
+          f"说清楚能做什么（{m1['actions']}）")
+    # 19b. 名字不对但内容没问题 -> 靠改名也算可以改
+    m2 = RH.assess(nop, off, peers=[])["modify"]
+    check(m2["code"] == "can_fix" and any("改名" in x for x in m2["actions"]),
+          f"只能改名也算可以改（{m2['label']} / {m2['actions']}）")
+    # 19c. 全是模组自己改过的 -> 别改（动手会毁掉它）
+    m3 = RH.assess(good, off_mod, peers=[])["modify"]
+    check(m3["code"] == "dont_touch",
+          f"剥了会毁掉 -> 别改（{m3['label']}）")
+    # 19d. 地图 -> 改不了，而且【不能】因为「还能改压缩方式」就说可以改
+    gdir2 = os.path.join(WORK, "gamepaks2")
+    os.makedirs(gdir2, exist_ok=True)
+    FX.make_pak(os.path.join(gdir2, "pakchunk1-Windows.pak"))
+    zlib_map = FX.make_pak(os.path.join(WORK, "pakchunk99-Mods_ZMap_P.pak"),
+                           {**FX.default_files(),
+                            "Mods/MyMap/MyLevel.umap": b"\xc1\x83\x2a\x9e" + b"m" * 50},
+                           methods=["Zlib", "", "", "", ""])
+    a_map = RH.assess(zlib_map, off, paks_dir=gdir2, peers=[])
+    m4 = a_map["modify"]
+    check(m4["code"] == "cannot_fix",
+          f"地图（哪怕还有压缩方式能改）-> 改不了（{m4['label']}）")
+    check(any("地图" in x for x in m4["blockers"]), "把「地图必须作者重烤」列为改不了")
+    check(any("压缩方式" in x for x in m4["actions"]),
+          "但如实列出「还能做什么」")
+    # 19e. 读不动 -> 改不了
+    m5 = RH.assess(bad_file, off, peers=[])["modify"]
+    check(m5["code"] == "cannot" and "读不动" in m5["blockers"][0],
+          f"坏文件 -> 改不了（{m5['label']}）")
+    # 19f. 引用断了 -> 工具改不了（但不算「别改」）
+    off_same = FX.make_stub_official(
+        [RC.OfficialAssets.full_path_of(FX.MOUNT, "Textures/Blood/T_Sample_Blood_BA_2.uasset")])
+    ref_pak = FX.make_pak(
+        os.path.join(WORK, "pakchunk9999-Mods_RefBroken_P.pak"),
+        {"Mods/Test/BP_R.uasset": FX.PKG_MAGIC + b"/Game/Mods/Test/BP_R\x00"
+         + b"/Game/Textures/Blood/T_Sample_Blood_BA\x00"})
+    a_ref = RH.assess(ref_pak, off_same, peers=[], refs=True)
+    m6 = a_ref["modify"]
+    check(m6["code"] in ("cannot_fix", "no_need"),
+          f"引用断了不说「可以改」（{m6['label']}）")
+    check(any("改不了资产内部的引用" in x or "引用" in x for x in m6["blockers"]),
+          f"明确说引用改不了（{m6['blockers']}）")
+    # 19g. 什么都没问题 -> 不用改（能用的模组不劝人动）
+    clean = FX.make_pak(os.path.join(WORK, "pakchunk9999-Mods_Clean_P.pak"),
+                        {k: FX._asset_blob(k, b"c" * 30) for k in FX.UNIQUE_ASSETS})
+    m7 = RH.assess(clean, off, peers=[])["modify"]
+    check(m7["code"] == "no_need", f"干净的新增内容 -> 不用改（{m7['label']}）")
+
+    print("   渲染 + 汇总表都要带上可改性")
+    buf4 = io.StringIO()
+    RH.render_assess(RH.assess(good, off, peers=[]), log=buf4.write)
+    check("可改性" in buf4.getvalue() and "能做什么" in buf4.getvalue(),
+          "诊断打印里含可改性")
+    buf5 = io.StringIO()
+    RH.print_assess_table([RH.assess(good, off, peers=[]),
+                           RH.assess(clean, off, peers=[])],
+                          log=buf5.write)
+    check("可改性汇总" in buf5.getvalue(), "汇总表里有可改性一栏")
+
     print(f"\n=== 体检功能测试 {'PASS' if not fails else 'FAIL ' + str(fails)} ===")
     return 0 if not fails else 1
 

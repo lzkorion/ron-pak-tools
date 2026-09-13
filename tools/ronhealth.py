@@ -457,7 +457,7 @@ def assess(src: str, official: RC.OfficialAssets | None = None, *,
     h = check(src, official, paks_dir=paks_dir, peers=peers, verify=verify)
     out = {"src": src, "name": h["name"], "ok": h["ok"], "health": h,
            "reasons": [], "diag": None, "kinds": [], "kind_note": "",
-           "refs": None,
+           "refs": None, "modify": None,
            "rename": {"needed": False, "new_name": h["name"], "reasons": []}}
 
     def finish(code):
@@ -478,6 +478,9 @@ def assess(src: str, official: RC.OfficialAssets | None = None, *,
         out["label"] = label
         out["why"] = why
         out["should_convert"] = (code == "convert")
+        # 可改性：把所有已算出来的信息（能不能读 / 有没有可剥 / 要不要改名 /
+        # 压缩方式 / 引用断没断）汇成一句「这个模组能不能改」
+        out["modify"] = modifiable(out)
         return out
 
     # ---- 0. 类型识别 + 要不要改名（这两项跟后面的结论无关，先算） ----
@@ -794,6 +797,107 @@ def apply_rename(src: str, new_name: str, outdir: str) -> str:
     return dst
 
 
+# ---------------------------------------------------------------------------
+# 可改性：这个模组有没有「本工具能改」的地方？改了会不会更糟？
+# ---------------------------------------------------------------------------
+MODIFY_LABELS = {
+    "can_fix": "可以改",
+    "no_need": "不用改",
+    "dont_touch": "别改",
+    "cannot_fix": "改不了",
+}
+MODIFY_WHY = {
+    "can_fix": "有明确、安全、值得做的事（见下面「能做什么」）",
+    "no_need": "没有可改的地方 —— 原样用就行，能用的模组不动它没有任何损失",
+    "dont_touch": "动手会毁掉它的功能（官方同路径的资产全是模组自己改过的）",
+    "cannot_fix": "问题在本工具能力之外（只能等模组作者或游戏官方）",
+}
+
+
+def modifiable(a: dict) -> dict:
+    """综合判断「这个模组能不能改」——能不能改、该不该改、能改什么。
+
+    ★ 和「该不该转换」不是一回事：
+      · 转换只是「剥掉照抄官方的资产」这一种改法；
+      · 这里还要看改名、压缩方式能不能修，以及**工具修不了什么**。
+      能用的模组一律不劝人动 —— 不做事永远是安全的选项。
+
+    返回 {code, label, why, actions[], blockers[], risky}
+    """
+    h = a.get("health") or {}
+    rn = a.get("rename") or {}
+    rr = a.get("refs") or {}
+    d = a.get("diag") or {}
+    findings = h.get("findings") or []
+    actions: list[str] = []
+    blockers: list[str] = []
+    risky = False
+
+    if not a.get("ok") or not h.get("ok"):
+        blockers.append("这个 pak 读不动（不是合法 pak，或索引解析不出来）——"
+                        "工具对它做不了任何事")
+        return {"code": "cannot", "label": "改不了", "why": MODIFY_WHY["cannot_fix"],
+                "actions": [], "blockers": blockers, "risky": False}
+
+    # ---- 能做什么 ----
+    if d.get("dropped"):
+        actions.append(f"剥掉 {d['dropped']} 条「和官方一模一样（照抄）」的资产"
+                       f"—— 这正是转换要干的，剥掉零损失")
+    if rn.get("needed") and rn.get("readable", True):
+        # 理由上面「✎ 改名就能修」那一段已经逐条列过了，这里不重复
+        actions.append(f"改名：{a['name']}  →  {rn['new_name']}")
+    if any("压缩方式" in f["title"] and f["level"] == LEVEL_ERROR
+           for f in findings):
+        actions.append("把压缩方式改成和游戏一致（不压缩重打包）—— "
+                       "修「卡在加载页面」那种问题")
+
+    # ---- 工具修不了什么 ----
+    if a.get("verdict") == "do_not":
+        risky = True
+    hard: list[str] = []                      # 硬伤：重打包改变不了的问题
+    for f in findings:
+        t = f["title"]
+        if "地图模组" in t:
+            hard.append("自定义地图必须作者重新烤 —— 重打包改变不了任何东西")
+        elif "孤儿条目" in t:
+            hard.append("有孤儿条目（只有 .uexp/.ubulk 没有 .uasset）——"
+                        "工具只剥不补，补不了缺失的包")
+        elif "挂载点不在游戏命名空间里" in t:
+            hard.append("资产挂在游戏从不访问的目录上 —— 那是打包问题，"
+                        "工具不搬文件")
+    blockers.extend(hard)
+    nb = rr.get("broken") or {}
+    n_ren = len(nb.get("renamed") or [])
+    n_gone = len(nb.get("gone") or [])
+    if n_ren:
+        blockers.append(f"{n_ren} 个引用的资产被游戏更新改名/搬走了 —— "
+                        f"工具只做剥、改名、压缩，改不了资产内部的引用，"
+                        f"只能等模组作者更新")
+    if n_gone:
+        blockers.append(f"{n_gone} 个引用的包名游戏里彻底没有（作者没打包进来，"
+                        f"或官方删了）—— 同样改不了")
+    if rr.get("misplaced"):
+        blockers.append(f"{len(rr['misplaced'])} 个资产内部记的包路径和它在 pak "
+                        f"里的位置对不上 —— 硬搬位置会改变它覆盖的对象，工具不做")
+
+    # ---- 结论 ----
+    # ★ 有硬伤（地图必须重烤 / 孤儿 / 挂载点不对）时，哪怕「还能做点什么」
+    #   也不能说「可以改」——实测 Hospital 改压缩方式照样闪退，那是作者的事。
+    if risky:
+        code = "dont_touch"
+    elif hard:
+        code = "cannot_fix"
+    elif actions:
+        code = "can_fix"
+    elif blockers:
+        code = "cannot_fix"
+    else:
+        code = "no_need"
+    return {"code": code, "label": MODIFY_LABELS[code], "why": MODIFY_WHY[code],
+            "actions": actions, "blockers": blockers, "hard": hard,
+            "risky": risky}
+
+
 def render_assess(a: dict, log=None) -> None:
     """打印「先诊断再转换」的结论：类型 + 能不能改 + 要不要改名。"""
     emit = log or print
@@ -826,10 +930,25 @@ def render_assess(a: dict, log=None) -> None:
             emit(f"   ✎ 名字也不对（该叫 {rn['new_name']}），"
                  f"但这个 pak 本身读不动 —— 改名救不了坏文件")
     emit(f"   ── 诊断结论：【{a['label']}】{a['why']}")
+    m = a.get("modify") or {}
+    if m:
+        emit("")
+        emit(f"   ── 可改性：【{m['label']}】{m['why']}")
+        acts = m.get("actions") or []
+        if acts and m.get("code") == "cannot_fix":
+            emit("        （下面这些做了也救不了它 —— 硬伤不在这一层）")
+        for x in acts:
+            emit(f"        ✔ 能做什么：{x}")
+        for x in m.get("blockers") or []:
+            emit(f"        ✘ 改不了：{x}")
+        if m.get("code") == "can_fix":
+            emit("        （动手前建议先备份；原文件不会被本工具修改）")
+        elif m.get("code") in ("no_need", "cannot_fix", "dont_touch"):
+            emit("        （既然现在能用，就别动它 —— 不做事永远是安全的选项）")
 
 
 def print_assess_table(results, log=None) -> None:
-    """汇总表：哪些该转、哪些不用转、哪些转了也没用。"""
+    """汇总表：哪些该转、哪些不用转、哪些改了也没用；以及能不能改。"""
     emit = log or print
     emit("")
     emit("=" * 66)
@@ -843,6 +962,28 @@ def print_assess_table(results, log=None) -> None:
             emit(f"   {label:<10} {len(buckets[label])} 个")
             for n in buckets[label]:
                 emit(f"        {n}")
+
+    # 可改性汇总：一眼看出「哪些值得动手、哪些别碰」
+    if any(a.get("modify") for a in results):
+        emit("")
+        emit("可改性汇总（本工具能不能改它、值不值得改）")
+        mb: dict[str, list[str]] = {}
+        for a in results:
+            m = a.get("modify") or {}
+            mb.setdefault(m.get("label", "未判定"), []).append(a["name"])
+        for label in ("可以改", "不用改", "别改", "改不了"):
+            if label not in mb:
+                continue
+            emit(f"   {label:<8} {len(mb[label])} 个")
+            for n in mb[label]:
+                a = next(x for x in results if x["name"] == n)
+                acts = (a.get("modify") or {}).get("actions") or []
+                hint = ""
+                # 「改不了」的模组不显示「能做什么」——那几条做了也救不了它
+                if acts and (a.get("modify") or {}).get("code") == "can_fix":
+                    one = acts[0]
+                    hint = "  →  " + (one if len(one) <= 30 else one[:29] + "…")
+                emit(f"        {n}{hint}")
 
 
 def main() -> int:
@@ -868,7 +1009,10 @@ def main() -> int:
                          "值不值得改」，不改任何文件")
     ap.add_argument("--refs", action="store_true",
                     help="引用分析：读模组资产里记的包路径，查它引用的资产"
-                         "游戏更新后还在不在（较慢；压缩资产需要本机有 oo2core）")
+                         "游戏更新后还在不在（压缩资产需要本机有 oo2core）")
+    ap.add_argument("--no-refs", action="store_true",
+                    help="关掉引用分析（--assess 默认会做，因为它直接决定"
+                         "「可改性」的判断）")
     ap.add_argument("--fix-names", metavar="输出目录", default=None,
                     help="自动改名修复：给缺 _P 后缀的补上、给加载顺序被压的"
                          "调大 pakchunk 号，结果复制到指定目录（原文件不动）")
@@ -915,12 +1059,16 @@ def main() -> int:
         return 0
 
     results = []
+    # --assess 默认连引用分析一起做：可改性判断要它（--no-refs 可以关掉）
+    do_refs = args.refs or (args.assess and not args.no_refs)
+    if do_refs and not args.refs:
+        print("（引用分析默认开启，用来判断「能不能改」；--no-refs 可关掉）")
     if args.assess or args.fix_names or args.refs:
         # 先诊断再转换（可选顺带改名修复 / 引用分析）：只给结论 + 可选产物
         ares = []
         for src in paks:
             a = assess(src, official, paks_dir=paks_dir, verify=args.verify,
-                       refs=args.refs)
+                       refs=do_refs)
             if args.fix_names and should_fix_name(a):
                 a["fixed_path"] = apply_rename(src, a["rename"]["new_name"],
                                                args.fix_names)
@@ -936,7 +1084,10 @@ def main() -> int:
         print_assess_table(ares)
         n_conv = sum(1 for a in ares if a["should_convert"])
         n_fix = sum(1 for a in ares if a.get("fixed_path"))
-        print(f"\n其中 {n_conv} 个建议转换；其余的转了也没用，甚至会更糟。")
+        n_mod = sum(1 for a in ares
+                    if (a.get("modify") or {}).get("code") == "can_fix")
+        print(f"\n其中 {n_conv} 个建议转换；{n_mod} 个「可以改」；"
+              f"其余的改了也没用，甚至会更糟。")
         if n_fix:
             print(f"      {n_fix} 个已生成改名后的副本（原文件没动）。")
         if args.json:

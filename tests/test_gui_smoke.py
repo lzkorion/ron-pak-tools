@@ -52,8 +52,8 @@ def main():
     check(app.health_var.get() is False, "默认非体检模式")
     check(app.fixnames_var.get() is False,
           "默认关闭「自动改名修复」（要显式勾才动文件名）")
-    check(app.refs_var.get() is False,
-          "默认关闭「引用分析」（较慢，且要读资产载荷）")
+    check(app.refs_var.get() is True,
+          "默认开启「引用分析」（「能不能改」要靠它判断）")
 
     print("\n2) 日志消息各分支")
     app._handle("log", "普通一行")
