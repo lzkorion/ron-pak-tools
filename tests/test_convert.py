@@ -125,6 +125,34 @@ def main():
             extra = f"  kept={d.kept} dropped={d.dropped}" if d.ok else ""
             print(f"[PASS] {label:<18} -> {d.verdict}{extra}")
 
+    # ------------------------------------------------------------------
+    # --repack-raw：把压缩方式改成「不压缩」
+    # 用于模组用了游戏没编进去的压缩方式（实测 Hospital 地图模组用 Zlib，
+    # 而本体全是 Oodle）—— 读不了资产就会卡加载。
+    # ------------------------------------------------------------------
+    print("\n=== --repack-raw（改压缩方式为不压缩）===")
+    import zlib as _zlib
+    data = b"hello unreal pak " * 50
+    got = P.decompress_payload("Zlib", _zlib.compress(data), [], len(data))
+    check(got == data, "Zlib 能解开", f"{len(got)} 字节")
+    check(P.decompress_payload("", data) == data, "不压缩的原样返回")
+    try:
+        P.decompress_payload("Oodle", data)
+        check(False, "Oodle 应该抛错（没有解码器）")
+    except Exception as ex:
+        check("Oodle" in str(ex), f"Oodle 抛错：{ex}")
+
+    src = os.path.join(WORK, "A_mixed_P.pak")
+    d = RC.diagnose(src, stub(*OFF), verbose=False)
+    outdir = os.path.join(WORK, "out_raw")
+    RC.convert(d, outdir, verify=False, raw=True)
+    chk = P.read_pak(d.out_path)
+    check(sorted(chk.all_paths()) == sorted(e.rel for e in d._elist
+                                            if e.rel not in d._drop),
+          f"改不压缩后条目一条不少（{len(chk.all_paths())}）")
+    check(chk.mount_point == FX.MOUNT, "挂载点没变")
+    check(any("不压缩" in a for a in d.actions), "结论里说明了改压缩方式")
+
     print(f"\n=== ronconvert 测试: "
           f"{'PASS' if not fails else 'FAIL ' + str(fails)} ===")
     return 0 if not fails else 1

@@ -653,6 +653,34 @@ def read_pak_index(path: str, *, tail_size: int = 4096) -> "PakIndex":
     return PakIndex(path, tail_size=tail_size)
 
 
+def decompress_payload(method: str, payload: bytes, block_lengths=(),
+                       uncompressed_size: int = 0) -> bytes:
+    """按压缩方式解开一个条目的载荷（多块的话逐块解）。
+
+    ★ 目前只支持 Zlib。Oodle 是商业编解码器（RAD Game Tools），
+      拿不到就不解 —— 调用方应当退回「原样搬运」。
+
+    用途：某些模组用了游戏根本没编进去的压缩方式（实测 Hospital 地图模组
+    用 Zlib，而本体全是 Oodle），读它的资产会失败。把载荷解开、以
+    【不压缩】重新写进 pak，就能绕开这个解码器问题（代价是包变大）。
+    """
+    m = (method or "").strip().lower()
+    if m == "zlib":
+        import zlib
+        lens = list(block_lengths) or [len(payload)]
+        out = bytearray()
+        off = 0
+        for n in lens:
+            out += zlib.decompress(payload[off:off + n])
+            off += n
+        if uncompressed_size and len(out) != uncompressed_size:
+            raise PakError(f"解压后大小不符：{len(out)} != {uncompressed_size}")
+        return bytes(out)
+    if not m:
+        return payload                    # 本来就是不压缩
+    raise PakError(f"不支持的压缩方式：{method}（只有 Zlib 能解）")
+
+
 class PakFile:
     """Read-only pak parser with index and data-area access."""
 

@@ -27,20 +27,13 @@ UP = r"G:\UE_5.8\Engine\Binaries\Win64\UnrealPak.exe"
 
 
 def paths_of(pak_path: str) -> tuple[str, list[str]]:
+    """(挂载点, [挂载内相对路径...])。
+
+    用 PakFile.paths_with_entries()（基于解析时记下的真实偏移）——
+    不要自己拿 encode_entry_index 重新编码去凑偏移，打包方编码宽度不同时会漂移。
+    """
     pk = P.read_pak(pak_path)
-    idx = pk.read_directory_index("fdi") or pk.read_directory_index("phi")
-    loc2path = {}
-    for d, files in idx.items():
-        for f, loc in files.items():
-            loc2path[loc] = (d + f).lstrip("/")
-    out = []
-    q = 0
-    for e in pk.encoded_entries:
-        rel = loc2path.get(q)
-        q += len(P.encode_entry_index(e))
-        if rel:
-            out.append(rel)
-    return pk.mount_point, out
+    return pk.mount_point, list(pk.paths_with_entries())
 
 
 def main() -> int:

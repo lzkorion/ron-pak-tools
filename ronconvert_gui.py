@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """RoN 模组转换器 —— 图形界面版
 
@@ -206,7 +206,7 @@ def save_config(cfg: dict) -> None:
 # ---------------------------------------------------------------------------
 def _worker(mod_dir: str, outdir: str, manifest: str | None,
             verify: bool, strip_all: bool, match_name: bool,
-            strip_modified: bool, health_only: bool,
+            strip_modified: bool, health_only: bool, repack_raw: bool,
             game_paks: str | None, q) -> None:
     """在子进程中执行转换，通过 q 回传消息。
 
@@ -235,10 +235,13 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
         log(f"输出目录 : {outdir}")
         match_name = bool(match_name)
         strip_modified = bool(strip_modified)
+        repack_raw = bool(repack_raw)
         log(f"官方校验 : {'开启' if verify else '关闭'}")
         log(f"剥离模式 : {'激进（官方已有即剥离）' if strip_all else '智能（只剥冲突型）'}")
         log(f"同名判定 : {'开启（文件名相同也算官方已有，有误剥风险）' if match_name else '关闭（只信路径完全一致）'}")
         log(f"改过的资产: {'剥掉（可能变成能进游戏但什么都不发生）' if strip_modified else '保留（推荐：那是模组的功能本身）'}")
+        if repack_raw:
+            log("压缩方式 : 改成【不压缩】重新打包（用于模组用了游戏没编进去的压缩方式）")
         log("=" * 70)
 
         # ---- 官方清单（由本机游戏生成，不随程序分发）----
@@ -354,7 +357,8 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                                     match_name=match_name,
                                     strip_modified=strip_modified, log=log)
                     if d.ok:
-                        RC.convert(d, outdir, verify=verify, log=log)
+                        RC.convert(d, outdir, verify=verify, log=log,
+                                   raw=repack_raw)
                 except Exception as ex:
                     # 单个 pak 出错不应中断整批
                     log(f"   ✘ 处理出错：{type(ex).__name__}: {ex}")
@@ -528,14 +532,21 @@ class App:
             text="体检模式：只诊断「为什么这个模组装了没效果」，不生成任何文件"
         ).grid(row=4, column=0, sticky="w")
 
+        self.raw_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opt, variable=self.raw_var,
+            text="改压缩方式为不压缩：用于模组压缩方式和游戏不一致导致卡加载"
+                 "（包会变大）"
+        ).grid(row=5, column=0, sticky="w")
+
         self.genman_var = tk.BooleanVar(value=False)
         chk = ttk.Checkbutton(
             opt, variable=self.genman_var,
             text="先生成官方资产清单（首次使用必做；游戏更新后重新生成）")
-        chk.grid(row=5, column=0, sticky="w")
+        chk.grid(row=6, column=0, sticky="w")
         self.game_var = tk.StringVar(value="游戏目录识别中…")
         ttk.Label(opt, textvariable=self.game_var,
-                  foreground="#666").grid(row=6, column=0, sticky="w", pady=(4, 0))
+                  foreground="#666").grid(row=7, column=0, sticky="w", pady=(4, 0))
 
         # ---- 按钮 ----
         bar = ttk.Frame(root, padding=(14, 6))
@@ -612,6 +623,8 @@ class App:
             self.strip_modified_var.set(bool(self.cfg["strip_modified"]))
         if "health_only" in self.cfg:
             self.health_var.set(bool(self.cfg["health_only"]))
+        if "repack_raw" in self.cfg:
+            self.raw_var.set(bool(self.cfg["repack_raw"]))
         if autostart and last and os.path.isdir(last):
             self.root.after(400, self.start)
 
@@ -768,7 +781,8 @@ class App:
                          "strip_all": bool(self.strip_all_var.get()),
                          "match_name": bool(self.match_name_var.get()),
                          "strip_modified": bool(self.strip_modified_var.get()),
-                         "health_only": bool(self.health_var.get())})
+                         "health_only": bool(self.health_var.get()),
+                         "repack_raw": bool(self.raw_var.get())})
         save_config(self.cfg)
 
         self.running = True
@@ -791,7 +805,8 @@ class App:
                       bool(self.strip_all_var.get()),
                       bool(self.match_name_var.get()),
                       bool(self.strip_modified_var.get()),
-                      bool(self.health_var.get()), game_paks, self.q),
+                      bool(self.health_var.get()),
+                      bool(self.raw_var.get()), game_paks, self.q),
                 daemon=True)
             self.proc.start()
         except Exception as ex:
@@ -1022,7 +1037,7 @@ def _selftest(moddir: str, verify: bool = False) -> int:
     q = ctx.Queue()
     proc = ctx.Process(target=_worker,
                        args=(moddir, outdir, man, verify, False, False, False,
-                             False, None, q),
+                             False, False, None, q),
                        daemon=True)
     proc.start()
 

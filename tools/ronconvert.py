@@ -938,8 +938,15 @@ def diagnose(src: str, official: OfficialAssets, *, strip_all: bool = False,
 
 
 def convert(d: Diagnosis, outdir: str, *, verify: bool = False,
-            target_version: int | None = None, log=None) -> Diagnosis:
-    """把诊断结果落成文件。"""
+            target_version: int | None = None, raw: bool = False,
+            log=None) -> Diagnosis:
+    """把诊断结果落成文件。
+
+    raw=True：把所有能解开的条目改写成【不压缩】。
+        用于模组用了游戏没编进去的压缩方式（实测 Hospital 地图模组用 Zlib，
+        而本体全是 Oodle）—— 解不开的资产会让游戏卡在加载页面。
+        代价是包会变大。解不开的（Oodle）原样搬运。
+    """
     emit = log or (lambda *_a, **_k: None)
     if not d.ok:
         return d
@@ -979,7 +986,7 @@ def convert(d: Diagnosis, outdir: str, *, verify: bool = False,
         d.copied = True
         return d
 
-    if d.dropped == 0 and tv == d.version:
+    if d.dropped == 0 and tv == d.version and not raw:
         # 完全不需要改：直接复制，保证字节一致、零风险
         emit("   正在原样复制（无需改动）...")
         shutil.copy2(d.src, out)
@@ -988,12 +995,37 @@ def convert(d: Diagnosis, outdir: str, *, verify: bool = False,
         d.copied = True
         d.actions.append("无需修改，已原样复制")
     else:
-        emit(f"   正在重新打包（保留 {d.kept} 条 / 剥离 {d.dropped} 条）...")
-        w = P.PakWriter(d.mount, methods=list(pk.compression_methods), version=tv)
+        if raw:
+            emit(f"   正在重新打包并改成【不压缩】（保留 {d.kept} 条 / "
+                 f"剥离 {d.dropped} 条）...")
+        else:
+            emit(f"   正在重新打包（保留 {d.kept} 条 / 剥离 {d.dropped} 条）...")
+        methods = list(pk.compression_methods)
+        w = P.PakWriter(d.mount, methods=methods, version=tv)
+        n_raw = n_kept_compressed = 0
         for e in elist:
             if e.rel in drop:
                 continue
             pe = e.path
+            if raw and pe.method_index != 0 and pe.size != pe.uncompressed_size:
+                mname = (methods[pe.method_index - 1]
+                         if 0 < pe.method_index <= len(methods) else "")
+                try:
+                    blob = P.decompress_payload(
+                        mname, pk.payload_of(pe), pe._block_lengths,
+                        pe.uncompressed_size)
+                except Exception:
+                    # 解不开（Oodle）-> 原样搬运
+                    n_kept_compressed += 1
+                    blob = None
+                if blob is not None:
+                    n_raw += 1
+                    w.add(e.rel, P.PakEntry(
+                        size=len(blob), uncompressed_size=len(blob),
+                        method_index=0, flags=pe.flags,
+                        compression_block_size=0, sha1=pe.sha1,
+                    ), blob)
+                    continue
             w.add(e.rel, P.PakEntry(
                 size=pe.size, uncompressed_size=pe.uncompressed_size,
                 method_index=pe.method_index, flags=pe.flags,
@@ -1005,6 +1037,11 @@ def convert(d: Diagnosis, outdir: str, *, verify: bool = False,
         d.out_bytes = info["total_bytes"]
         if tv != d.version:
             d.actions.append(f"版本 {d.version} -> {tv}")
+        if raw:
+            d.actions.append(
+                f"改成不压缩：{n_raw} 条已解开重写"
+                + (f"，{n_kept_compressed} 条解不开（Oodle）仍保持原压缩"
+                   if n_kept_compressed else ""))
         d.actions.append(f"写出 {os.path.basename(out)}（{info['entries']} 条）")
 
     # 自研读回自检
@@ -1112,6 +1149,10 @@ def main() -> int:
                     help="连「模组自己改过」的资产也剥掉（默认保留）。"
                          "只在游戏一进就崩、需要清掉旧蓝图时才用 —— "
                          "开了之后模组很可能变成'能进游戏但什么都不发生'")
+    ap.add_argument("--repack-raw", action="store_true",
+                    help="把条目改成【不压缩】重新打包。用于模组用了游戏没编进去的"
+                         "压缩方式（比如 Zlib 而本体是 Oodle），会导致卡加载。"
+                         "代价是包变大")
     ap.add_argument("--target-version", type=int, default=None,
                     help=f"输出 pak 版本（默认跟随源；当前游戏为 {PAK_VERSION_LATEST}）")
     ap.add_argument("--verify", action="store_true",
@@ -1161,7 +1202,8 @@ def main() -> int:
                      strip_modified=args.strip_modified)
         if not args.dry_run and d.ok:
             convert(d, outdir, verify=args.verify,
-                    target_version=args.target_version)
+                    target_version=args.target_version,
+                    raw=args.repack_raw)
         results.append(d)
         # 打印结论
         print(f"   ── 结论：{d.verdict}")
