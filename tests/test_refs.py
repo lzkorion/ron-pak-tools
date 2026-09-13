@@ -223,6 +223,43 @@ def main():
           f"PakIndex.payload_of 与 PakFile 一致（{len(a1)} vs {len(a2)}）")
     check(a1.startswith(FX.PKG_MAGIC), "读到的确实是载荷（UE 包魔数开头）")
 
+    print("\n10) 崩溃风险预警：引用指向游戏已改名/移除的资产")
+    # 实测案例：一个老 HK416 武器模组覆盖了官方武器蓝图，蓝图里引用的附件
+    # 被官方改名了，游戏一启动就崩（EXCEPTION_ACCESS_VIOLATION /
+    # FAsyncLoadingThread）。所以这里必须报出来，而且要说人话。
+    risky = FX.make_pak(
+        os.path.join(WORK, "pakchunk999-Mods_Crash_P.pak"),
+        {"Blueprints/Items/WeaponsRevised/Primary_HK416.uasset": pkg_blob(
+            "/Game/Blueprints/Items/WeaponsRevised/Primary_HK416",   # 它自己
+            "/Game/Blueprints/Items/Attachments/Magazines/BP_Magazine_PMAG30",
+            "/Game/Crosshair/CH_HK416",                             # 游戏里没有
+        )})
+    off3 = FX.make_stub_official([
+        RC.OfficialAssets.full_path_of(
+            FX.MOUNT, "Blueprints/Items/Attachments/BP_Magazine_PMAG.uasset"),
+    ])
+    a_crash = RH.assess(risky, off3, peers=[], refs=True)
+    cr = a_crash.get("crash_risk") or {}
+    check(cr.get("renamed", 0) >= 1,
+          f"扫出「游戏已改名」的引用（{cr.get('renamed')} 处）")
+    check(any("bp_magazine_pmag" in x for x in cr.get("examples") or []),
+          f"并且告诉玩家现在叫什么（{cr.get('examples')}）")
+    check(any("崩溃风险" in x for x in a_crash["reasons"]),
+          "结论里明确写出崩溃风险")
+    buf6 = io.StringIO()
+    RH.render_assess(a_crash, log=buf6.write)
+    txt6 = buf6.getvalue()
+    check("崩溃风险" in txt6 and "移出 Paks" in txt6,
+          "并给出「移出 Paks 再启动一次」的确认办法")
+    check("既然现在能用" not in txt6,
+          "会崩的模组不会再说「既然现在能用就别动它」")
+    # 干净的模组不该有这个警告
+    a_clean = RH.assess(FX.make_pak(os.path.join(WORK, "pakchunk9999-Mods_Ok_P.pak"),
+                                    {k: FX._asset_blob(k, b"o" * 30)
+                                     for k in FX.UNIQUE_ASSETS}),
+                        off3, peers=[], refs=True)
+    check(not a_clean.get("crash_risk"), "没断链的模组不报崩溃风险")
+
     print(f"\n=== 引用分析测试 {'PASS' if not fails else 'FAIL ' + str(fails)} ===")
     return 0 if not fails else 1
 

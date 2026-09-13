@@ -426,6 +426,7 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
 
             skip: set[str] = set()
             n_fixable = 0
+            n_crash = 0
             mod_buckets: dict[str, int] = {}
             if assess_first and RH is not None:
                 log("先诊断：逐个判断「能不能改、值不值得改」，只转该转的")
@@ -446,6 +447,8 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                     ares.append(a)
                     if (a.get("modify") or {}).get("code") == "can_fix":
                         n_fixable += 1
+                    if (a.get("crash_risk") or {}).get("renamed"):
+                        n_crash += 1
                     mlabel = (a.get("modify") or {}).get("label")
                     if mlabel:
                         mod_buckets[mlabel] = mod_buckets.get(mlabel, 0) + 1
@@ -460,6 +463,10 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                         f"「能做什么」；其余的不用动。")
                 else:
                     log("没有「可以改」的 —— 这些模组本工具帮不上忙（原样用就行）。")
+                if n_crash:
+                    log(f"⚠ 有 {n_crash} 个模组【有崩溃风险】：它们引用了游戏"
+                        f"已经改名/移除的资产（老模组的典型症状）——"
+                        f"装上去可能一启动就崩，看上面带「⚠ 崩溃风险」的那几段。")
                 log("=" * 70)
                 if not skip:
                     log("（没有需要跳过的）")
@@ -588,6 +595,7 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                         "buckets": buckets, "summary": summary,
                         "renamed": n_renamed,
                         "fixable": n_fixable, "modify": mod_buckets,
+                        "crash_risk": n_crash,
                         "seconds": time.time() - t_all}))
     except Exception as ex:
         try:
@@ -1126,6 +1134,14 @@ class App:
                              "其余的原样用就行）")
             else:
                 mod_line += "  （没有值得动手的模组 —— 它们原样用就行）"
+        n_crash = int(info.get("crash_risk", 0) or 0)
+        crash_line = ""
+        if n_crash:
+            crash_line = (f"\n\n⚠ 有 {n_crash} 个模组【有崩溃风险】：它们引用了游戏"
+                          f"已经改名或移除的资产\n"
+                          f"    （老模组的典型症状，装上可能一启动就崩）。\n"
+                          f"    日志里搜「崩溃风险」看是哪几个；想确认就把那个 pak "
+                          f"移出 Paks 目录再启动一次。")
         if getattr(self, "_health_mode", False):
             n_err = sum(1 for s in info.get("summary", []) if s.get("problems"))
             msg = (f"体检完成。\n\n"
@@ -1145,7 +1161,7 @@ class App:
                    f"没有生成文件\n"
                    f"    （它们原样用就行，转了反而可能变糟）\n"
                    f"{fix_line}{mod_line}\n"
-                   f"注意：原文件没有被修改。")
+                   f"注意：原文件没有被修改。{crash_line}")
             if b.get("无法处理"):
                 msg += f"\n\n有 {b['无法处理']} 个 pak 无法处理，请看日志。"
             self._finish(ok=True, msg=None)
@@ -1154,7 +1170,8 @@ class App:
         msg = (f"转换完成。\n\n"
                f"共 {info.get('total', 0)} 个 pak，成功处理 {good} 个。\n"
                f"输出目录：\n{self.outdir}\n{fix_line}{mod_line}\n\n"
-               f"注意：原文件没有被修改。确认没问题后再用 converted 里的文件替换。")
+               f"注意：原文件没有被修改。确认没问题后再用 converted 里的文件替换。"
+               f"{crash_line}")
         if b.get("无法处理"):
             msg += f"\n\n有 {b['无法处理']} 个 pak 无法处理，请看日志。"
         self._finish(ok=True, msg=None)

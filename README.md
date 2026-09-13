@@ -45,6 +45,7 @@ Ready or Not 每次大更新，都会**把一部分热门模组的内容直接�
 | **自动改名修复** | 补 `_P` 后缀、调 pakchunk 加载顺序，出一份改好名的副本（原文件不动） |
 | **引用分析** | 读资产内部记的包路径，查出「引用的资产游戏更新后没了」并给出现在的名字 |
 | **老格式 pak** | 很久没更新的模组（v1~v9 索引）也能读、能诊断、能安全重打包 |
+| **崩溃风险预警** | 引用指向游戏已改名/移除的资产时直接提示「先别装」，并给出确认办法 |
 | **可改性判定** | 直接回答「这个模组能不能改、值不值得改」，能用的模组不劝人动 |
 | **重新打包** | 自己实现 pak v11/v12 写入器，压缩数据原样搬运，保留条目**逐字节不变** |
 | **官方校验** | 可选调用本机 UnrealPak 做 `-List` / `-Test` 复核 |
@@ -293,6 +294,38 @@ python tools/ronhealth.py "C:\你的模组文件夹" --assess
 python tools/ronhealth.py "C:\你的模组文件夹" --fix-names "C:\你的模组文件夹\fixed"
 ```
 
+### 崩溃风险预警：装之前就告诉你「别装」（v1.10.0）
+
+**这是真实事故换来的功能。** 一个很久没更新的 HK416 武器模组，装进游戏后一启动就崩：
+
+```
+Unhandled Exception: EXCEPTION_ACCESS_VIOLATION writing address 0x000000000000005b
+Crash in runnable thread FAsyncLoadingThread
+```
+
+查清了：它覆盖的官方 HK416 武器蓝图里**硬引用了 53 个游戏已经没有的资产**（附件
+蓝图、粒子等）—— 官方这些年把它们**改名/删掉**了。游戏启动时异步加载武器蓝图，
+解析不出那些类 → 空指针写入 → 崩。**pak 格式没问题**（官方 `UnrealPak -Test` rc=0），
+问题是**内容对着旧版本游戏做的**。
+
+现在诊断会把这件事单独拎出来：
+
+```
+   ⚠ 崩溃风险：【11 处引用指向游戏已改名/移除的资产】—— 老模组的典型信号
+        · P_WeaponFlash_AssaultRifle → 现在叫 p_weaponflash_assaultrifle_2.uasset
+        · BP_Magazine_PMAG30 → 现在叫 bp_magazine_pmag.uasset
+        · 实测这类模组会让游戏一启动就崩（EXCEPTION_ACCESS_VIOLATION / FAsyncLoadingThread）
+        · 想确认是不是它：把这个 pak 移出 Paks 目录，再启动一次游戏
+```
+
+- 汇总表里给这类模组标上「⚠ 崩溃风险 N 处（老模组）」
+- 会崩的模组**不再**说「既然现在能用就别动它」（它现在就不能用）
+- 完成弹窗也会单独提示有几个模组有崩溃风险
+
+> 注意：这是**风险提示**，不是「必定崩」。实测有的模组引用了一堆游戏已改名的
+> 资产却仍然能用（比如某些武器模组）—— 所以真出问题时的判定办法很简单：
+> **把可疑的 pak 移出 `Paks` 目录，再启动一次游戏。**
+
 ### 老格式 pak（很久没更新的模组）也能读（v1.9.0）
 
 社区里的老模组很多是用老打包工具做的（**老格式 pak：v1~v9**），索引结构和现在的
@@ -482,6 +515,7 @@ and repacks the mod without the conflicting parts.
 | **Rename repair** | Appends `_P`, fixes the pakchunk load order, writes a correctly named copy (originals untouched) |
 | **Reference analysis** | Reads the package paths recorded inside assets and finds references the game update broke, suggesting the current name |
 | **Legacy paks** | Long-unmaintained mods (v1-v9 index) are read, diagnosed and safely repacked |
+| **Crash-risk warning** | Flags references to renamed/removed assets and says "don't install", with a way to confirm |
 | **Modifiability verdict** | Says plainly whether the tool can improve a mod, and refuses to recommend touching one that already works |
 | **Path-exact matching** | "Same file name" is **not** "same asset". Only a full path match counts (see below) |
 | **Repacking** | Own pak v11/v12 writer. Compressed bytes are copied verbatim, so kept entries stay **byte-identical** |
@@ -612,6 +646,42 @@ and whether converting it can help at all:
 | Data table | The usual way mods change values; stripping it deletes the feature |
 | Audio / animation replacement | Overriding official assets is normal |
 | Purely additive content | All new paths the game never had; nothing to strip |
+
+### Crash-risk warning: it tells you "do not install" up front (v1.10.0)
+
+**This feature came out of a real incident.** A long-unmaintained HK416 weapon mod
+made the game crash on launch:
+
+```
+Unhandled Exception: EXCEPTION_ACCESS_VIOLATION writing address 0x000000000000005b
+Crash in runnable thread FAsyncLoadingThread
+```
+
+Root cause: the official HK416 weapon blueprint it overrides **hard-references 53
+assets the game no longer ships** (attachment blueprints, particles...). The game
+renamed or removed them over the years; at launch it async-loads the weapon
+blueprint, cannot resolve those classes, and writes through a null pointer.
+**The pak format was fine** (official `UnrealPak -Test` returns rc=0) - the content
+was simply built against an older version of the game.
+
+The diagnosis now calls this out separately:
+
+```
+   ! Crash risk: 11 references point at assets the game renamed/removed
+        - P_WeaponFlash_AssaultRifle -> now called p_weaponflash_assaultrifle_2.uasset
+        - BP_Magazine_PMAG30 -> now called bp_magazine_pmag.uasset
+        - measured: mods like this crash the game on launch
+        - to confirm: move that pak out of the Paks folder and launch again
+```
+
+- Mods like this are tagged "crash risk" in the summary table
+- A crashing mod no longer gets the "if it works, leave it alone" line (it does not
+  work) - it gets "this is not a matter of *how* to modify it: don't install it"
+- The completion dialog reports how many mods carry the risk
+
+> This is a **risk indicator**, not a verdict of certain doom: some mods reference
+> plenty of renamed assets and still work. The definitive test when something does
+> break is simple: **move the suspect pak out of `Paks` and launch again.**
 
 ### Legacy paks (long-unmaintained mods) are readable now (v1.9.0)
 

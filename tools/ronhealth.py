@@ -486,9 +486,24 @@ def assess(src: str, official: RC.OfficialAssets | None = None, *,
         br = rr.get("broken") or {}
         n_ren, n_gone = len(br.get("renamed") or []), len(br.get("gone") or [])
         if n_ren:
+            # ★ 这一条要说得重一点：游戏里有「近似的名字」= 官方后来把它改名/搬走了
+            #   = 这个模组是老版本做的。实测（HK416 武器模组）这种模组装上后
+            #   游戏一启动就崩：EXCEPTION_ACCESS_VIOLATION / FAsyncLoadingThread。
+            ex = []
+            for it in (br.get("renamed") or [])[:3]:
+                s = (it.get("suggest") or [""])[0]
+                if s:
+                    ex.append(f"{it['ref'].rsplit('/', 1)[-1]} → 现在叫 "
+                              f"{s.rsplit('/', 1)[-1]}")
+            out["crash_risk"] = {
+                "renamed": n_ren, "gone": n_gone, "examples": ex,
+                "assets": [it["assets"][0] for it in (br.get("renamed") or [])[:3]],
+            }
             out["reasons"].append(
-                f"引用分析：{n_ren} 个引用的包名游戏里已经没有，但存在同名主干的新"
-                f"资产 —— 多半是这次更新改名/搬了目录（转换修不了，得等作者更新）")
+                f"⚠ 崩溃风险：{n_ren} 处引用指向游戏【已经改名/搬走】的资产"
+                + (f"（例：{'；'.join(ex)}）" if ex else "")
+                + " —— 这是老模组的典型信号，实测这类模组会让游戏一启动就崩"
+                  "（EXCEPTION_ACCESS_VIOLATION / FAsyncLoadingThread）")
         if n_gone:
             out["reasons"].append(
                 f"引用分析：{n_gone} 个引用的包名游戏里彻底没有 —— "
@@ -889,9 +904,13 @@ def modifiable(a: dict) -> dict:
     n_ren = len(nb.get("renamed") or [])
     n_gone = len(nb.get("gone") or [])
     if n_ren:
-        blockers.append(f"{n_ren} 个引用的资产被游戏更新改名/搬走了 —— "
+        blockers.append(f"{n_ren} 处引用指向游戏已经改名/搬走的资产 —— "
                         f"工具只做剥、改名、压缩，改不了资产内部的引用，"
                         f"只能等模组作者更新")
+        # 有这种断链时最该说的不是「能不能改」，而是「先别装」
+        hard.append("这个模组是老版本做的（引用了游戏已改名/移除的资产）——"
+                    "实测这类模组装上会让游戏一启动就崩；先把它移出 Paks 目录"
+                    "再启动一次就能确认是不是它")
     if n_gone:
         blockers.append(f"{n_gone} 个引用的包名游戏里彻底没有（作者没打包进来，"
                         f"或官方删了）—— 同样改不了")
@@ -963,7 +982,23 @@ def render_assess(a: dict, log=None) -> None:
         if m.get("code") == "can_fix":
             emit("        （动手前建议先备份；原文件不会被本工具修改）")
         elif m.get("code") in ("no_need", "cannot_fix", "dont_touch"):
-            emit("        （既然现在能用，就别动它 —— 不做事永远是安全的选项）")
+            cr0 = a.get("crash_risk") or {}
+            if cr0.get("renamed"):
+                # 会崩的模组别说「能用就别动」—— 它现在就不能用
+                emit("        （它不是「怎么改」的问题：先别装，等作者更新）")
+            else:
+                emit("        （既然现在能用，就别动它 ——"
+                     " 不做事永远是安全的选项）")
+    cr = a.get("crash_risk") or {}
+    if cr.get("renamed"):
+        emit("")
+        emit(f"   ⚠ 崩溃风险：【{cr['renamed']} 处引用指向游戏已改名/移除的资产】"
+             f"—— 老模组的典型信号")
+        for ex in (cr.get("examples") or [])[:3]:
+            emit(f"        · {ex}")
+        emit("        · 实测这类模组会让游戏一启动就崩"
+             "（EXCEPTION_ACCESS_VIOLATION / FAsyncLoadingThread）")
+        emit("        · 想确认是不是它：把这个 pak 移出 Paks 目录，再启动一次游戏")
 
 
 def print_assess_table(results, log=None) -> None:
@@ -997,11 +1032,13 @@ def print_assess_table(results, log=None) -> None:
             for n in mb[label]:
                 a = next(x for x in results if x["name"] == n)
                 acts = (a.get("modify") or {}).get("actions") or []
+                cr = a.get("crash_risk") or {}
                 hint = ""
-                # 「改不了」的模组不显示「能做什么」——那几条做了也救不了它
                 if acts and (a.get("modify") or {}).get("code") == "can_fix":
                     one = acts[0]
                     hint = "  →  " + (one if len(one) <= 30 else one[:29] + "…")
+                if cr.get("renamed"):
+                    hint += f"   ⚠ 崩溃风险 {cr['renamed']} 处（老模组）"
                 emit(f"        {n}{hint}")
 
 

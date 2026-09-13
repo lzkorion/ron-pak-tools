@@ -4,7 +4,7 @@
 
 用法（token 只用于这一次，不会写进任何文件）：
     set GITHUB_TOKEN=ghp_xxxx
-    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.9.0
+    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.10.0
 
 会做：
   1. 发布前合规检查（exe 内不得含游戏数据 / Epic 工具）
@@ -97,7 +97,7 @@ game installation. It is written only on your machine and never uploaded.
 - 可选调用你本机的 UnrealPak 做 `-List` / `-Test` 复核
 - **原始模组文件不会被修改**，结果输出到 `converted` 子目录
 
-## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.9.0
+## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.10.0
 
 v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常多写一层
 `ReadyOrNot/`（挂载点里已经有了），于是和官方永远「同路径匹配不上」、
@@ -129,6 +129,45 @@ v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常
 
 已用四个真实模组端到端复核：官方 `UnrealPak -List` / `-Test` 全部 rc=0，
 孤儿 0、缺件 0、新增 0、挂载点不变。
+
+### v1.10.0 新增（崩溃风险预警：装之前就告诉你「别装」）
+
+**这是真实事故换来的功能。** 有用户下了一个很久没更新的 HK416 武器模组，装进
+游戏后**一启动就崩**：
+
+```
+Fatal error!
+Unhandled Exception: EXCEPTION_ACCESS_VIOLATION writing address 0x000000000000005b
+Crash in runnable thread FAsyncLoadingThread
+```
+
+查清了：那个模组覆盖了官方的 HK416 武器蓝图，而蓝图里**硬引用了 53 个游戏现在
+已经没有的资产** —— 附件蓝图 `BP_Magazine_PMAG30`、`Scope_Eotech_EXPS3`、
+`BP_Suppressor_RC1/RC2/…`、粒子 `P_WeaponFlash_AssaultRifle` 等，官方这些年把它们
+**改名或删掉**了（例如 `P_WeaponFlash_AssaultRifle` → 现在叫
+`p_weaponflash_assaultrifle_2`，`BP_Magazine_PMAG30` → 现在叫 `bp_magazine_pmag`）。
+游戏启动时会异步加载武器蓝图，解析不出那些类 → 空指针写入 → 崩。
+
+**pak 格式没问题**（官方 `UnrealPak -Test` 对它 rc=0，引擎版本也和本体一致），
+所以这不是「老格式读不了」，而是**内容对着旧版本游戏做的**。
+
+现在诊断会把这件事单独拎出来说：
+
+```
+   ⚠ 崩溃风险：【11 处引用指向游戏已改名/移除的资产】—— 老模组的典型信号
+        · P_WeaponFlash_AssaultRifle → 现在叫 p_weaponflash_assaultrifle_2.uasset
+        · BP_Magazine_PMAG30 → 现在叫 bp_magazine_pmag.uasset
+        · 实测这类模组会让游戏一启动就崩（EXCEPTION_ACCESS_VIOLATION / FAsyncLoadingThread）
+        · 想确认是不是它：把这个 pak 移出 Paks 目录，再启动一次游戏
+```
+
+- 汇总表里也会给这类模组标上「⚠ 崩溃风险 N 处（老模组）」
+- 会崩的模组**不再**说「既然现在能用就别动它」（它现在就不能用），
+  改成「它不是「怎么改」的问题：先别装，等作者更新」
+- 界面完成弹窗也会单独提示有几个模组有崩溃风险
+
+**怎么用**：转换/诊断前照常勾「先诊断再转换」（默认开），只要引用分析跑过
+（默认开），这条预警就会自己出来。
 
 ### v1.9.0 新增（支持老格式 pak + 两处安全修复）
 
@@ -344,7 +383,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="发布 exe 到 GitHub Releases")
     ap.add_argument("--user", required=True)
     ap.add_argument("--repo", default="ron-pak-tools")
-    ap.add_argument("--tag", default="v1.9.0")
+    ap.add_argument("--tag", default="v1.10.0")
     ap.add_argument("--name", default=None, help="Release 标题（默认同 tag）")
     ap.add_argument("--exe", default=os.path.join("dist", EXE_NAME))
     ap.add_argument("--dry-run", action="store_true")
