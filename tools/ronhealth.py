@@ -322,31 +322,50 @@ def check(src: str, official: RC.OfficialAssets | None = None, *,
             "未更新的关卡会崩溃。卡加载/闪退基本都是这个原因，"
             "重新打包改变不了任何东西 —— 只能等作者更新或换图。")
 
-    # ---------- 5b. 压缩方式必须和游戏一致 ----------
+    # ---------- 5b. 压缩方式能不能被游戏读出来 ----------
+    # ★ Zlib / Gzip 是 UE 内核自带的（任何版本的游戏都有），模组用它们没问题 ——
+    #   实测 Hospital（Zlib）改不改压缩方式都照样闪退，卡加载不是压缩方式造成的。
+    #   真正要担心的是「游戏没有的解码器」（比如第三方插件的 Zstd/LZ4）。
+    CORE_METHODS = {"zlib", "gzip"}
     mine_methods = [m for m in pk.compression_methods if m]
     r["methods"] = mine_methods
     game_methods = game_compression_methods(paks_dir) if paks_dir else []
+    exotic = [m for m in mine_methods if m.lower() not in CORE_METHODS]
     if mine_methods and game_methods:
-        if set(mine_methods) - set(game_methods):
+        missing = [m for m in exotic if m not in game_methods]
+        if missing:
             add(LEVEL_ERROR,
-                f"压缩方式 {mine_methods} 和游戏本体 {game_methods} 不一致",
+                f"压缩方式 {missing} 不在游戏支持的范围 {game_methods} 里",
                 f"游戏本体用的是 {game_methods}，这个包用的是 {mine_methods}",
-                "游戏如果没把对应的解码器编进去，读这个包的资产就会失败 —— "
+                "游戏没把对应的解码器编进去的话，读这个包的资产就会失败 —— "
                 "表现就是卡在加载页面。用能输出 "
                 f"{'/'.join(game_methods)} 的工具重新打包"
                 "（社区打包脚本用的是 -compressionformats=Oodle）")
-        else:
+        elif exotic:
             add(LEVEL_OK, f"压缩方式 {mine_methods} 和游戏本体一致")
+        else:
+            add(LEVEL_INFO,
+                f"压缩方式 {mine_methods}（UE 内核自带，游戏一定读得了）",
+                "本体用的是 " + "/".join(game_methods),
+                "Zlib/Gzip 是引擎内置的，模组用它们不会导致读不了资产。")
 
     # ---------- 6. 抽样看包格式（.uasset 头部魔数） ----------
     # 只读索引的话拿不到数据区，所以直接按偏移 seek 读 4 个字节 —— 不用把
     # 整个 pak（可能上 GB）读进内存。压缩条目没法直接看，跳过。
-    idx = pk.read_directory_index("fdi") or pk.read_directory_index("phi")
+    # ★ 老格式（v1..v9）没有 FDI/PHI，路径直接在索引里 —— 走 paths_with_entries。
+    pairs = pk.paths_with_entries()
     loc2rel = {}
-    for dname, files in idx.items():
-        for fname, loc in files.items():
-            loc2rel[loc] = (dname + fname).lstrip("/")
-    loc2e = pk.location_map()
+    loc2e = {}
+    if pk.legacy_entries is not None:
+        for i, (rel, pe) in enumerate(pk.legacy_entries):
+            loc2e[i] = pe
+            loc2rel[i] = rel
+    else:
+        idx = pk.read_directory_index("fdi") or pk.read_directory_index("phi")
+        for dname, files in idx.items():
+            for fname, loc in files.items():
+                loc2rel[loc] = (dname + fname).lstrip("/")
+        loc2e = pk.location_map()
 
     sampled = bad_magic = 0
     bad_samples: list[str] = []

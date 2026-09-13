@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import struct
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -173,6 +174,81 @@ def make_official_pak(path: str) -> str:
         "Content/Textures/T_Official_Sample.uasset": b"official-sample" * 10,
         "Content/Textures/T_Official_Sample.uexp": b"official-sample-exp" * 5,
     }, mount="../../../")
+
+
+def make_legacy_pak(path: str, files: dict[str, bytes] | None = None,
+                    mount: str = MOUNT, version: int = 3,
+                    block_size: int = 64 * 1024) -> str:
+    """造一个【老格式】pak（v1..v9：挂载点 + 条目数 + 每条(路径, FPakEntry)）。
+
+    ★ 为什么需要：社区里那些很久没更新的模组常常是老工具打的（实测遇到一个
+      v3 + Zlib 的），老格式没有 FPakEntryLocation / FDI / PHI，路径恢复方式
+      完全不同 —— 没有这个 fixture，老格式支持就没法锁进测试。
+
+    按 v3 的规矩写（和实测的真实 pak 逐字节对过）：
+      · 每条 = FString 路径 + [offset(i64) size(i64) usz(i64) method(i32)
+        sha1(20) 块数(i32) 块(i64起点,i64终点)* flags(u8) 块大小(i32)]
+      · 块起点是【文件绝对偏移】，首块紧跟在条目头（73 字节）后面
+      · footer = magic + version + index_offset + index_size + sha1(index)（44 字节）
+    """
+    import zlib as _zlib
+    if files is None:
+        files = default_files()
+
+    # 一趟算出数据区布局（条目头 + 紧跟其后的压缩块）
+    data = bytearray()
+    plan = []
+    for rel in sorted(files):
+        blob = files[rel]
+        hdr_off = len(data)
+        chunks = [_zlib.compress(blob[i:i + block_size])
+                  for i in range(0, len(blob), block_size)]
+        # 条目头长度：48 固定 + 4 块数 + 16*块数 + 1 标志 + 4 块大小
+        # （单块 73 字节，和实测的真实 v3 pak 一致）
+        hdr_size = 48 + 4 + 16 * len(chunks) + 1 + 4
+        blocks = []
+        pos = hdr_off + hdr_size
+        for c in chunks:
+            blocks.append((pos, pos + len(c)))
+            pos += len(c)
+        size = sum(e - s for s, e in blocks)
+        hdr = (struct.pack("<qqq", hdr_off, size, len(blob))
+               + struct.pack("<I", 1)                 # CompressionMethod 1 = Zlib
+               + hashlib.sha1(blob).digest()
+               + struct.pack("<i", len(blocks)))
+        for s, e in blocks:
+            hdr += struct.pack("<qq", s, e)
+        hdr += struct.pack("<B", 0)                   # Flags
+        hdr += struct.pack("<I", block_size)          # CompressionBlockSize
+        if len(hdr) != hdr_size:
+            raise AssertionError(f"条目头应为 {hdr_size} 字节，实际 {len(hdr)}")
+        data += hdr + b"".join(chunks)
+        plan.append((rel, hdr_off, size, len(blob), blocks))
+
+    # 索引区
+    mb = mount.encode() + b"\x00"
+    idx = bytearray(struct.pack("<i", len(mb)) + mb)
+    idx += struct.pack("<i", len(plan))
+    for rel, hdr_off, size, usz, blocks in plan:
+        rb = rel.encode() + b"\x00"
+        idx += struct.pack("<i", len(rb)) + rb
+        idx += struct.pack("<qqq", hdr_off, size, usz)
+        idx += struct.pack("<I", 1)
+        idx += hashlib.sha1(files[rel]).digest()
+        idx += struct.pack("<i", len(blocks))
+        for s, e in blocks:
+            idx += struct.pack("<qq", s, e)
+        idx += struct.pack("<B", 0)
+        idx += struct.pack("<I", block_size)
+
+    index_offset = len(data)
+    footer = (struct.pack("<I", P.MAGIC) + struct.pack("<i", version)
+              + struct.pack("<qq", index_offset, len(idx))
+              + hashlib.sha1(bytes(idx)).digest())
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(bytes(data) + bytes(idx) + footer)
+    return path
 
 
 def make_official_pak_like_real(path: str, identical: bool = False) -> str:

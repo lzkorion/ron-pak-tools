@@ -692,10 +692,12 @@ def _is_conflict_type(rel: str, ext: str) -> bool:
 
 
 def read_mod(path: str) -> tuple[P.PakFile, dict[str, P.PakEntry]]:
+    """读出 pak 和它的 {相对路径: 条目}。
+
+    ★ 不要在这里直接要 FDI/PHI：老格式（v1..v9）没有二级索引，
+      路径本来就在主索引里。paths_with_entries() 两种格式都认。
+    """
     pk = P.read_pak(path)
-    idx = pk.read_directory_index("fdi") or pk.read_directory_index("phi")
-    if not idx:
-        raise P.PakError("pak 里没有目录索引，无法恢复路径")
     entries = pk.paths_with_entries()
     if not entries:
         raise P.PakError("pak 里没有目录索引，无法恢复路径")
@@ -738,11 +740,17 @@ def diagnose(src: str, official: OfficialAssets, *, strip_all: bool = False,
     d.version = pk.version
     d.mount = pk.mount_point
     d.methods = [m for m in pk.compression_methods if m]
-    d.total_entries = len(pk.encoded_entries)
+    # 老格式没有 encoded 条目表，条目数就是路径数
+    d.total_entries = (len(pk.encoded_entries) if pk.encoded_entries
+                       else len(entries))
     d.recovered = len(entries)
 
     if pk.version not in SUPPORTED_VERSIONS:
-        d.problems.append(f"pak 版本 {pk.version} 不在支持范围 {SUPPORTED_VERSIONS}")
+        # 读了能读（v1 起都认），只是我们【写】的是游戏本体在用的那个版本。
+        # 老模组（社区里那些很久没更新的）多半就是这样，别当错误吓人。
+        d.actions.append(
+            f"pak 是老格式 v{pk.version}（本工具能读能诊断；"
+            f"要重新打包会写成 v{SUPPORTED_VERSIONS[0]}，游戏两种都读）")
 
     # ---- 逐个条目判定 ----
     elist: list[Entry] = []
@@ -956,7 +964,16 @@ def convert(d: Diagnosis, outdir: str, *, verify: bool = False,
     pk: P.PakFile = d._pak
     elist: list[Entry] = d._elist
     drop: set[str] = d._drop
-    tv = target_version or d.version
+    # ★ 老格式（v1..v9）的源 pak 不能「沿用源版本号」：我们的写入器只会写
+    #   v11/v12 的索引，标成 v3 就成了四不像（实测 UnrealPak -Test 直接 rc=1）。
+    #   统一写成游戏本体在用的那个版本（实测本体就是 v11）。
+    if target_version:
+        tv = target_version
+    elif d.version in SUPPORTED_VERSIONS:
+        tv = d.version
+    else:
+        tv = SUPPORTED_VERSIONS[0]
+        emit(f"   源 pak 是老格式 v{d.version}：产物按 v{tv}（游戏本体的格式）写。")
 
     if d.kept == 0:
         # ★ 一条都不剩时【不要写空包】。
@@ -1046,18 +1063,37 @@ def convert(d: Diagnosis, outdir: str, *, verify: bool = False,
 
     # 自研读回自检
     emit("   自检：读回生成的 pak ...")
+    self_ok = True
     try:
         chk = P.read_pak(out)
         got = sorted(chk.all_paths())
         want = sorted(e.rel for e in elist if e.rel not in drop)
         if got != want:
+            self_ok = False
             d.problems.append(f"自检失败：写回路径 {len(got)} 条，期望 {len(want)} 条")
     except Exception as ex:
+        self_ok = False
         d.problems.append(f"自检读取失败：{type(ex).__name__}: {ex}")
 
     if verify:
         emit("   校验：调用官方 UnrealPak -List / -Test（大模组可能要等一会）...")
         d.verify = unrealpak_check(out)
+
+    # ★ 自检/官方复核没过 -> 把产物删掉，绝不把「看着像模组、其实坏的」pak
+    #   留在输出目录里让人装进游戏。宁可什么都不给，也不能给一个坏的。
+    bad_verify = isinstance(d.verify, dict) and d.verify.get("ok") is False
+    if not self_ok or bad_verify:
+        why = ("官方 UnrealPak -Test 没过" if bad_verify else "读回自检没过")
+        try:
+            os.remove(out)
+            emit(f"   ✘ {why}：产物已删除，不给你一个可能装坏的 pak。")
+        except OSError:
+            emit(f"   ✘ {why}：产物删不掉，请手动删除 {out}")
+        d.out_path = ""
+        d.out_bytes = 0
+        d.copied = False
+        d.actions.append(f"产物未通过{why}，已丢弃（原模组保持不变，可继续用）")
+        d.problems.append(f"产物未通过{why} —— 已丢弃，没有生成任何文件")
     return d
 
 

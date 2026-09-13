@@ -64,9 +64,11 @@ LOC_INVALID = -0x80000000
 LOC_MAX_INDEX = 0x7FFFFFFE
 
 # Version thresholds used below.
-V_COMPRESSION_ENCRYPTION = 3
-V_RELATIVE_CHUNK_OFFSETS = 5
-V_FNAME_BASED_METHOD = 8
+V_INITIAL = 1                    # 最早的版本：条目里带 Timestamp
+V_COMPRESSION_ENCRYPTION = 3     # 起：条目带压缩块表 + 标志位 + 块大小
+V_RELATIVE_CHUNK_OFFSETS = 5     # 起：offset 相对数据区起点（不再是文件绝对偏移）
+V_FNAME_BASED_METHOD = 8         # 起：footer 里带压缩方式名表
+V_ENCODED_INDEX = 10             # 起：FPakEntryLocation + FDI/PHI（二级索引）
 V_FNV64_BUGFIX = 11
 V_UTF8_PAK_DIRECTORY = 12
 
@@ -443,7 +445,15 @@ class PakWriter:
         return len(self._entries)
 
     def _method_table(self) -> list[str]:
-        return list(self.methods)
+        """footer 里的压缩方式名表：**永远**写满 5 个槽位（每个 32 字节）。
+
+        ★ 这里必须补齐：少写几个槽位会让整个 footer 短一截，UnrealPak 直接
+          「Unable to open pak file」（实测：只传 1 个方法名时，包连打开都打不开，
+          而自研读取器因为按 magic 扫描 + 校验索引 SHA1，反而读得出来）。
+        """
+        table = [str(m or "") for m in self.methods][:MAX_NUM_COMPRESSION_METHODS]
+        table += [""] * (MAX_NUM_COMPRESSION_METHODS - len(table))
+        return table
 
     def build(self, out_path: str, *, write_fdi: bool = True,
               write_phi: bool = True,
@@ -748,8 +758,16 @@ class PakFile:
                    PakFile 传整份数据（base=0）；PakIndex 只传索引区，
                    于是 phi/fdi 的偏移会被换算成「相对 data」，
                    这样 read_directory_index() 等下游代码两边都能直接用。
+
+        ★ v10 之前是【老格式】：索引就是「挂载点 + 条目数 + 每条(路径, FPakEntry)」，
+          没有 FPakEntryLocation / FDI / PHI。社区里那些很久没更新的模组常常是
+          这种老格式（实测遇到一个 v3 + Zlib 的），所以必须单独走一条路读。
         """
         d = self.data if data is None else data
+        if self.version < V_ENCODED_INDEX:
+            self._read_legacy_index(d, base)
+            return
+        self.legacy_entries = None
         p = self.index_offset - base
         self.mount_point, p = r_str(d, p)
         self.num_entries = struct.unpack_from("<i", d, p)[0]
@@ -798,6 +816,72 @@ class PakFile:
             e, q = decode_entry_index(self.encoded, q, self.version)
             self.encoded_entries.append(e)
 
+    def _read_legacy_index(self, d: bytes, base: int) -> None:
+        """v1..v9 的老格式索引：挂载点 + 条目数 + 每条 (路径, FPakEntry)。
+
+        v1 的条目里多一个 Timestamp(i64)；v3 起压缩条目带块表（块是
+        「(起点, 终点)」两个 i64，不是起点+长度），标志位和块大小【总是】写。
+
+        ★ 解析完必须正好停在索引区末尾：对不上就报错。老格式没有二级索引可以
+          兜底，宁可明确说「读不了」，也不能拿半截索引去喂后面的判断。
+        """
+        p = self.index_offset - base
+        limit = p + self.index_size
+        self.legacy_entries: list[tuple[str, PakEntry]] = []
+        self.has_phi = self.has_fdi = False
+        self.phi = self.fdi = None
+        self.encoded = b""
+        self.encoded_entries = []
+        self.encoded_offsets = []
+        self.non_encodable = []
+        # 老格式的 footer 里没有「压缩方式名」表（v8 才有），用的是内置枚举：
+        # 0=None 1=Zlib 2=Gzip 3=Custom —— 正好对上 method_index 的 1 基下标。
+        # v8/v9 的 footer 里已经有真表，别覆盖它。
+        if self.version < V_FNAME_BASED_METHOD or not any(
+                self.compression_methods):
+            self.compression_methods = []
+        try:
+            self.mount_point, p = r_str(d, p)
+            self.num_entries = struct.unpack_from("<i", d, p)[0]
+            p += 4
+            for _ in range(self.num_entries):
+                rel, p = r_str(d, p)
+                e, p = PakEntry.deserialize_header(d, p, self.version)
+                if self.version <= V_INITIAL:
+                    # v1 在 CompressionMethod 与 Hash 之间还有 Timestamp(i64)；
+                    # deserialize_header 没读它，这里补上（v2 起就没有了）。
+                    p += 8
+                if e.compressed and e.compression_blocks:
+                    # (起点, 终点) -> 每块长度；解压和多块搬运都要用
+                    e._block_lengths = [max(0, en - st)
+                                        for st, en in e.compression_blocks]
+                    # 老格式的块偏移是【文件绝对偏移】。正常情况下块紧跟条目头，
+                    # 直接切片就行；万一不连续（规范允许），记下来按块拼。
+                    hdr_end = e.offset + e.header_size(self.version)
+                    if e.compression_blocks[0][0] != hdr_end:
+                        e._abs_blocks = list(e.compression_blocks)
+                self.legacy_entries.append((rel, e))
+        except (struct.error, ValueError, IndexError) as ex:
+            raise PakError(
+                f"老格式（v{self.version}）索引解析失败：{ex}。"
+                f"如果这个 pak 是老工具打的、或者启用了索引加密，本工具暂时读不了") from ex
+        if p != limit:
+            raise PakError(
+                f"老格式（v{self.version}）索引没解析完：停在 {p}，索引末尾在 "
+                f"{limit}（差 {limit - p} 字节）—— 不敢拿半截索引下结论")
+        # 只把【真正用到】的压缩方式列进表里（下标要对齐 method_index）：
+        # 老格式的 method 是内置枚举，全列出来会让上层以为这个包什么都用了。
+        # 槽位数按 v11 的规矩补齐（写 pak 时 footer 必须写满 5 个）。
+        if self.version < V_FNAME_BASED_METHOD:
+            used = {e.method_index for _rel, e in self.legacy_entries
+                    if e.method_index}
+            enum = ["Zlib", "Gzip", "Custom"]
+            table = [enum[i - 1] if 1 <= i <= len(enum) else ""
+                     for i in range(1, (max(used) if used else 0) + 1)]
+            table += [""] * (MAX_NUM_COMPRESSION_METHODS - len(table))
+            self.compression_methods = table
+        self.index_parsed_end = p
+
     def location_map(self) -> dict[int, "PakEntry"]:
         """FPakEntryLocation -> 条目。
 
@@ -819,7 +903,12 @@ class PakFile:
         return out
 
     def paths_with_entries(self) -> dict[str, "PakEntry"]:
-        """{挂载内相对路径: 条目} —— 按 FDI/PHI 把路径和条目接起来。"""
+        """{挂载内相对路径: 条目} —— 按 FDI/PHI 把路径和条目接起来。
+
+        老格式（v1..v9）没有 FDI/PHI：路径就在索引里，直接给。
+        """
+        if self.legacy_entries is not None:
+            return dict(self.legacy_entries)
         idx = self.read_directory_index("fdi") or self.read_directory_index("phi")
         loc2e = self.location_map()
         out: dict[str, PakEntry] = {}
@@ -871,7 +960,11 @@ class PakFile:
 
         Directory keys are stored as '/Content/Blueprints/' and the mount-relative
         path is the concatenation, so strip the single leading '/'.
+
+        老格式（v1..v9）：索引里本来就有完整路径。
         """
+        if self.legacy_entries is not None:
+            return [rel for rel, _e in self.legacy_entries]
         idx = self.read_directory_index("fdi")
         if not idx:
             idx = self.read_directory_index("phi")
@@ -895,6 +988,9 @@ class PakFile:
 
         拿不到条目的记 -1。大小是 FPakEntry 里的原始值。
         """
+        if self.legacy_entries is not None:
+            return [(rel, e.uncompressed_size, e.size)
+                    for rel, e in self.legacy_entries]
         idx = self.read_directory_index("fdi")
         if not idx:
             idx = self.read_directory_index("phi")
@@ -929,7 +1025,16 @@ class PakFile:
         return self.read_at(pos, e.header_size(self.version) + e.size)
 
     def payload_of(self, e: PakEntry) -> bytes:
-        """Just the payload (compressed bytes when compressed)."""
+        """Just the payload (compressed bytes when compressed).
+
+        ★ 只有老格式里「块不紧跟条目头」的条目才需要按块拼（那时 _abs_blocks 里
+          存的是文件的绝对偏移）。v11 索引里的块偏移是「57 基准」的相对值，
+          绝不能拿来当文件偏移用 —— 那会读到别的条目的数据。
+        """
+        blocks = getattr(e, "_abs_blocks", None)
+        if blocks:
+            return b"".join(self.read_at(st, max(0, en - st))
+                            for st, en in blocks)
         start = e.offset + e.header_size(self.version)
         return self.read_at(start, e.size)
 

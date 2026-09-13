@@ -44,6 +44,7 @@ Ready or Not 每次大更新，都会**把一部分热门模组的内容直接�
 | **先诊断再转换** | 先给结论（可以转换 / 不用转换 / 不建议转换 / 转换也修不好），只转该转的 |
 | **自动改名修复** | 补 `_P` 后缀、调 pakchunk 加载顺序，出一份改好名的副本（原文件不动） |
 | **引用分析** | 读资产内部记的包路径，查出「引用的资产游戏更新后没了」并给出现在的名字 |
+| **老格式 pak** | 很久没更新的模组（v1~v9 索引）也能读、能诊断、能安全重打包 |
 | **可改性判定** | 直接回答「这个模组能不能改、值不值得改」，能用的模组不劝人动 |
 | **重新打包** | 自己实现 pak v11/v12 写入器，压缩数据原样搬运，保留条目**逐字节不变** |
 | **官方校验** | 可选调用本机 UnrealPak 做 `-List` / `-Test` 复核 |
@@ -292,6 +293,29 @@ python tools/ronhealth.py "C:\你的模组文件夹" --assess
 python tools/ronhealth.py "C:\你的模组文件夹" --fix-names "C:\你的模组文件夹\fixed"
 ```
 
+### 老格式 pak（很久没更新的模组）也能读（v1.9.0）
+
+社区里的老模组很多是用老打包工具做的（**老格式 pak：v1~v9**），索引结构和现在的
+（v10~v12）完全不同 —— 以前工具只能报「读不了」。现在能读、能诊断、能分析引用、
+也能安全重打包：
+
+- 老格式没有 `FPakEntryLocation` / FDI / PHI，**路径直接写在主索引里**；
+  压缩块是「(起点, 终点)」的**绝对偏移**对
+- 老格式的压缩方式是内置枚举（`1`=Zlib、`2`=Gzip），会自动映射成名字
+- 解析完**必须正好停在索引区末尾**，对不上就明确报错 —— 绝不拿半截索引下结论
+- 重新打包会写成**游戏本体在用的 v11**（不会沿用老的版本号）
+
+实测：一个老工具打的 HK416 武器模组（v3 + Zlib / 227 条）——
+路径 227/227 恢复、引用分析跑通、重打包后 221 条载荷**逐字节不变**、
+官方 `UnrealPak -Test` **rc=0**。
+
+顺带两条和它一起修掉的安全问题：
+
+| 修复 | 说明 |
+|---|---|
+| **产物没过校验就删掉** | 「读回自检」或官方 `-Test` 任一没过 → 产物**当场删除**并说明原因，绝不把「看着像模组、其实坏的」pak 留给你（原模组不变） |
+| **压缩方式名表必须写满 5 槽** | 只写 1 个槽位会让 footer 短 128 字节，UnrealPak 连打开都打不开 —— 而自研读取器反而读得出来，所以这坑藏了很久。现在写入器强制补齐 + 有测试锁住 |
+
 ### 「能不能改」：软件直接给结论（v1.8.0）
 
 每次诊断的最后一行是一句明确的可改性结论 —— 本工具能不能改它、值不值得改：
@@ -457,6 +481,7 @@ and repacks the mod without the conflicting parts.
 | **Diagnose before converting** | Verdict first (convert / no need / not advisable / unfixable), then it only converts what is worth converting |
 | **Rename repair** | Appends `_P`, fixes the pakchunk load order, writes a correctly named copy (originals untouched) |
 | **Reference analysis** | Reads the package paths recorded inside assets and finds references the game update broke, suggesting the current name |
+| **Legacy paks** | Long-unmaintained mods (v1-v9 index) are read, diagnosed and safely repacked |
 | **Modifiability verdict** | Says plainly whether the tool can improve a mod, and refuses to recommend touching one that already works |
 | **Path-exact matching** | "Same file name" is **not** "same asset". Only a full path match counts (see below) |
 | **Repacking** | Own pak v11/v12 writer. Compressed bytes are copied verbatim, so kept entries stay **byte-identical** |
@@ -587,6 +612,32 @@ and whether converting it can help at all:
 | Data table | The usual way mods change values; stripping it deletes the feature |
 | Audio / animation replacement | Overriding official assets is normal |
 | Purely additive content | All new paths the game never had; nothing to strip |
+
+### Legacy paks (long-unmaintained mods) are readable now (v1.9.0)
+
+Many older mods were packed with old tooling (**legacy pak format: v1-v9**), whose
+index layout is completely different from the current one (v10-v12). The tool used
+to just say "unreadable". Now it reads, diagnoses, analyses references and repacks
+them safely:
+
+- Legacy paks have no `FPakEntryLocation` / FDI / PHI - **paths live in the primary
+  index**, and compression blocks are **(start, end) absolute-offset pairs**
+- Legacy compression is a built-in enum (`1`=Zlib, `2`=Gzip), mapped to names
+- Parsing **must land exactly on the end of the index area**, otherwise it fails
+  loudly - half an index is never used to draw conclusions
+- Repacking writes **v11, the format the game itself uses** (never the old version
+  number)
+
+Measured on a 2019-era HK416 weapon mod (v3 + Zlib, 227 entries): 227/227 paths
+recovered, reference analysis complete, repacked output keeps all 221 payloads
+**byte-identical**, and official `UnrealPak -Test` returns **rc=0**.
+
+Two safety fixes came with it:
+
+| Fix | What it means |
+|---|---|
+| **Failed verification deletes the output** | If either the read-back self-check or the official `-Test` fails, the artifact is **deleted on the spot** with the reason stated. You never get a pak that looks fine but is broken (your original stays untouched) |
+| **The compression method table must be padded to 5 slots** | Writing a single slot makes the footer 128 bytes short: UnrealPak cannot even open the pak, while this tool's own lenient reader still could - which is why the bug hid for so long. The writer now pads, with a test pinning it |
 
 ### "Can it be modified?" - the tool answers it (v1.8.0)
 

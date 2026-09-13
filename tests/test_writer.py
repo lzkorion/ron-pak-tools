@@ -157,6 +157,134 @@ def main():
     check(got3 == sorted(files),
           f"paths_with_entries 仍返回全部路径（{len(got3)}）")
 
+    # ------------------------------------------------------------------
+    print("\n6) 老格式（v3 + Zlib）：社区里很久没更新的模组就是这种")
+    sys.path.insert(0, HERE)
+    import fixtures as FX
+    import zlib as _zlib
+    legacy_files = {
+        "Blueprints/Items/WeaponsRevised/BP_SampleGun.uasset":
+            FX.PKG_MAGIC + b"legacy-asset-" * 40,
+        "Textures/Blood/T_Sample_Blood_BA.ubulk": b"legacy-bulk-" * 9000,
+        "Textures/Blood/T_Sample_Blood_BA.uexp": b"legacy-exp-" * 20,
+    }
+    lp = FX.make_legacy_pak(os.path.join(WORK, "legacy_P.pak"), legacy_files)
+
+    lpk = P.read_pak(lp)
+    check(lpk.version == 3, f"读到的是老格式 v{lpk.version}")
+    check(lpk.mount_point == FX.MOUNT, f"挂载点 {lpk.mount_point!r}")
+    check(len(lpk.all_paths()) == len(legacy_files),
+          f"路径全部恢复（{len(lpk.all_paths())}/{len(legacy_files)}）")
+    check([m for m in lpk.compression_methods if m] == ["Zlib"],
+          f"老格式的压缩方式是内置枚举映射出来的（{lpk.compression_methods}）")
+    ok_payload = 0
+    for rel, blob in legacy_files.items():
+        e = lpk.paths_with_entries()[rel]
+        got = P.decompress_payload("Zlib", lpk.payload_of(e), e._block_lengths,
+                                   e.uncompressed_size)
+        if got == blob and e.uncompressed_size == len(blob):
+            ok_payload += 1
+    check(ok_payload == len(legacy_files),
+          f"{ok_payload}/{len(legacy_files)} 条载荷解压后逐字节一致")
+    sizes = dict((r, (u, s)) for r, u, s in lpk.all_paths_with_sizes())
+    check(sizes["Textures/Blood/T_Sample_Blood_BA.ubulk"][0]
+          == len(legacy_files["Textures/Blood/T_Sample_Blood_BA.ubulk"]),
+          "all_paths_with_sizes 对老格式也给得出大小")
+
+    # 只读索引那一版（PakIndex）也必须能读
+    lidx = P.read_pak_index(lp)
+    check(len(lidx.all_paths()) == len(legacy_files),
+          "PakIndex（只读索引）也能恢复路径")
+    ei = lidx.paths_with_entries()["Blueprints/Items/WeaponsRevised/BP_SampleGun.uasset"]
+    check(P.decompress_payload("Zlib", lidx.payload_of(ei), ei._block_lengths,
+                               ei.uncompressed_size)
+          == legacy_files["Blueprints/Items/WeaponsRevised/BP_SampleGun.uasset"],
+          "PakIndex 按需从文件里读出的载荷是对的")
+
+    print("   老格式索引坏了要【报错】，不能凑合")
+    raw = bytearray(open(lp, "rb").read())
+    import struct as _s
+    idx_off, idx_size = _s.unpack_from("<qq", raw, len(raw) - 44 + 8)
+    cnt_at = idx_off + 4 + len(FX.MOUNT) + 1
+    # 把条目数改少一个：解析得完，但停不到索引末尾 —— 必须被完整性检查拦住。
+    # （同时重算 footer 里的索引 SHA1，免得先被 SHA1 自检拦掉，
+    #   这样才真正测到老格式解析器自己的检查）
+    raw[cnt_at:cnt_at + 4] = _s.pack("<i", len(legacy_files) - 1)
+    raw[len(raw) - 20:] = hashlib.sha1(
+        bytes(raw[idx_off:idx_off + idx_size])).digest()
+    bp = os.path.join(WORK, "legacy_broken_P.pak")
+    open(bp, "wb").write(bytes(raw))
+    try:
+        P.read_pak(bp)
+        check(False, "条目数对不上的老格式索引应当报错")
+    except Exception as ex:
+        check("没解析完" in str(ex),
+              f"索引没铺满 -> 明确报错（{type(ex).__name__}: {str(ex)[:70]}）")
+
+    # 索引整个被截断/乱掉也不能凑合给出半截结果
+    raw2 = bytearray(open(lp, "rb").read())
+    raw2[cnt_at:cnt_at + 4] = _s.pack("<i", 9999)
+    raw2[len(raw2) - 20:] = hashlib.sha1(
+        bytes(raw2[idx_off:idx_off + idx_size])).digest()
+    bp2 = os.path.join(WORK, "legacy_broken2_P.pak")
+    open(bp2, "wb").write(bytes(raw2))
+    try:
+        P.read_pak(bp2)
+        check(False, "条目数离谱的老格式索引应当报错")
+    except Exception as ex:
+        check(isinstance(ex, P.PakError),
+              f"离谱条目数 -> 报错而不是崩（{type(ex).__name__}: {str(ex)[:50]}）")
+
+    # 重打包：必须写成 v11（游戏本体的格式），不能沿用源版本号 3
+    import ronconvert as RC
+    o2 = os.path.join(WORK, "legacy_out")
+    shutil.rmtree(o2, ignore_errors=True)
+    gun = "Blueprints/Items/WeaponsRevised/BP_SampleGun.uasset"
+    lpk0 = P.read_pak(lp)
+    gun_e = lpk0.paths_with_entries()[gun]
+    gun_full = RC.OfficialAssets.full_path_of(FX.MOUNT, gun)
+    # 官方那份和模组逐字节一样 -> 连【压缩后大小】都相同，才敢判「照抄」
+    official = FX.make_stub_official(
+        [gun_full], {gun_full: (gun_e.uncompressed_size, gun_e.size)})
+    d = RC.diagnose(lp, official, verbose=False)
+    check(d.recovered == d.total_entries == len(legacy_files),
+          f"诊断恢复 {d.recovered}/{d.total_entries} 条")
+    check(d.dropped == 1, f"认出 1 条和官方一模一样的（{d.dropped}）")
+    RC.convert(d, o2, verify=False)
+    if d.out_path:
+        rb = P.read_pak(d.out_path)
+        check(rb.version == 11, f"产物写成了 v{rb.version}（不是源版本 3）")
+        want = sorted(set(legacy_files) - {gun})
+        check(sorted(rb.all_paths()) == want,
+              f"剥离后路径正确（{len(rb.all_paths())} 条，应为 {len(want)}）")
+        same = 0
+        for rel, e in rb.paths_with_entries().items():
+            if rb.payload_of(e) == lpk0.payload_of(
+                    lpk0.paths_with_entries()[rel]):
+                same += 1
+        check(same == len(rb.all_paths()),
+              f"保留下来的载荷逐字节不变（{same}/{len(rb.all_paths())}）")
+        rc, txt = run_up(d.out_path, "-Test")
+        check(rc == 0, f"官方 UnrealPak -Test rc={rc}")
+    else:
+        check(False, f"老格式重打包没产出文件：{d.problems}")
+
+    print("\n7) 自检没过就【不许把产物留给用户】")
+    d2 = RC.diagnose(lp, official, verbose=False)
+    o3 = os.path.join(WORK, "legacy_bad")
+    shutil.rmtree(o3, ignore_errors=True)
+    real_check = RC.unrealpak_check
+    RC.unrealpak_check = lambda pak: {"ok": False, "list_rc": 1, "test_rc": 1}
+    try:
+        RC.convert(d2, o3, verify=True)
+    finally:
+        RC.unrealpak_check = real_check
+    left = os.listdir(o3) if os.path.isdir(o3) else []
+    check(d2.out_path == "" and not left,
+          f"官方复核失败 -> 产物已删除（目录里剩 {left}）")
+    check(any("丢弃" in a for a in d2.actions),
+          f"并且明确说明（{d2.actions[-1:]}）")
+
     print(f"\n=== 写入器测试 {'PASS' if not fails else 'FAIL ' + str(fails)} ===")
     return 0 if not fails else 1
 

@@ -142,7 +142,7 @@ def main():
     check(r11["ok"], "能读")
     check(r11["errors"] == 0, f"无 error（{r11['errors']}）", titles(r11))
 
-    print("\n11) 压缩方式必须和游戏本体一致")
+    print("\n11) 压缩方式：Zlib/Gzip 是引擎自带的，不算问题；游戏没有的才算")
     gdir = os.path.join(WORK, "gamepaks")
     os.makedirs(gdir, exist_ok=True)
     FX.make_pak(os.path.join(gdir, "pakchunk1-Windows.pak"))
@@ -151,12 +151,21 @@ def main():
     r12 = RH.check(good, off, paks_dir=gdir, peers=[])
     check(find(r12, "压缩方式", RH.LEVEL_OK) is not None,
           "Oodle 一致 -> 通过", titles(r12))
-    # 一个用 Zlib 的模组（Hospital 地图模组就是这样，游戏是 Oodle）
+    # Zlib：Hospital 地图模组就是 Zlib，而本体是 Oodle —— 但 Zlib 是 UE 内核自带的，
+    # 实测把它的压缩方式改掉照样闪退，所以这里【不能】报错（老版本误报过）。
     zlib_pak = FX.make_pak(os.path.join(WORK, "pakchunk99-Mods_Zlib_P.pak"),
                            methods=["Zlib", "", "", "", ""])
     r13 = RH.check(zlib_pak, off, paks_dir=gdir, peers=[])
-    check(find(r13, "压缩方式", RH.LEVEL_ERROR) is not None,
-          "Zlib 不一致 -> 报错", titles(r13))
+    check(find(r13, "压缩方式", RH.LEVEL_ERROR) is None,
+          "Zlib 只是提示，不报错", titles(r13))
+    check(find(r13, "UE 内核自带") is not None,
+          "并说明「引擎一定读得了」", titles(r13))
+    # 游戏没有的解码器（第三方插件的 Zstd）才是真问题
+    zstd_pak = FX.make_pak(os.path.join(WORK, "pakchunk99-Mods_Zstd_P.pak"),
+                           methods=["Zstd", "", "", "", ""])
+    r13b = RH.check(zstd_pak, off, paks_dir=gdir, peers=[])
+    check(find(r13b, "压缩方式", RH.LEVEL_ERROR) is not None,
+          "游戏没有的压缩方式 -> 报错", titles(r13b))
 
     print("\n12) 「先诊断再转换」的结论")
     # 12a. 有照抄官方的冲突资产 -> 可以转换
@@ -338,11 +347,12 @@ def main():
     gdir2 = os.path.join(WORK, "gamepaks2")
     os.makedirs(gdir2, exist_ok=True)
     FX.make_pak(os.path.join(gdir2, "pakchunk1-Windows.pak"))
-    zlib_map = FX.make_pak(os.path.join(WORK, "pakchunk99-Mods_ZMap_P.pak"),
-                           {**FX.default_files(),
-                            "Mods/MyMap/MyLevel.umap": b"\xc1\x83\x2a\x9e" + b"m" * 50},
-                           methods=["Zlib", "", "", "", ""])
-    a_map = RH.assess(zlib_map, off, paks_dir=gdir2, peers=[])
+    # 用游戏【没有】的压缩方式，保证「还能做点什么」这一栏非空
+    bad_c_pak = FX.make_pak(os.path.join(WORK, "pakchunk99-Mods_ZMap_P.pak"),
+                            {**FX.default_files(),
+                             "Mods/MyMap/MyLevel.umap": b"\xc1\x83\x2a\x9e" + b"m" * 50},
+                            methods=["Zstd", "", "", "", ""])
+    a_map = RH.assess(bad_c_pak, off, paks_dir=gdir2, peers=[])
     m4 = a_map["modify"]
     check(m4["code"] == "cannot_fix",
           f"地图（哪怕还有压缩方式能改）-> 改不了（{m4['label']}）")

@@ -4,7 +4,7 @@
 
 用法（token 只用于这一次，不会写进任何文件）：
     set GITHUB_TOKEN=ghp_xxxx
-    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.8.0
+    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.9.0
 
 会做：
   1. 发布前合规检查（exe 内不得含游戏数据 / Epic 工具）
@@ -97,7 +97,7 @@ game installation. It is written only on your machine and never uploaded.
 - 可选调用你本机的 UnrealPak 做 `-List` / `-Test` 复核
 - **原始模组文件不会被修改**，结果输出到 `converted` 子目录
 
-## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.8.0
+## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.9.0
 
 v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常多写一层
 `ReadyOrNot/`（挂载点里已经有了），于是和官方永远「同路径匹配不上」、
@@ -129,6 +129,34 @@ v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常
 
 已用四个真实模组端到端复核：官方 `UnrealPak -List` / `-Test` 全部 rc=0，
 孤儿 0、缺件 0、新增 0、挂载点不变。
+
+### v1.9.0 新增（支持老格式 pak + 两处安全修复）
+
+**🕰 能读「很久没更新的老模组」了。** 社区里那些几年没更新的模组，很多是用老
+打包工具做的（老格式 pak：v1~v9），以前工具直接报「读不了」。现在能读能诊断：
+
+- 老格式（v1~v9）与现行格式（v10~v12）的索引结构完全不同 —— 老格式没有
+  `FPakEntryLocation` / FDI / PHI，路径就直接写在主索引里，压缩块是
+  「(起点, 终点)」绝对偏移对。这些都按实测的真实 pak 逐字节对过。
+- 实测一个 2019 年前后打包的 HK416 武器模组（v3 + Zlib，227 条）：路径
+  227/227 全部恢复，84 个资产的引用分析也跑通了。
+- 老格式的压缩方式用的是内置枚举（1=Zlib / 2=Gzip），会自动映射成名字。
+- **重新打包时会写成游戏本体在用的 v11**，不会「沿用源版本号」——
+  以前那样写会产出一个 UnrealPak 连打开都打不开的包（实测 rc=1）。
+
+**🛡 产物没过校验就删掉，绝不把坏 pak 留给你。** 现在只要「读回自检」或
+官方 `UnrealPak -Test` 任何一项没过，产物会被**当场删除**并明确告诉你原因
+（原模组不变、可继续用）。宁可什么都不给，也不给一个装上去会出事的包。
+
+**🔧 修一个会写出坏 pak 的坑**：压缩方式名表必须写满 5 个槽位（每个 32 字节）。
+只传 1 个方法名时，footer 会短 128 字节 —— UnrealPak 直接
+「Unable to open pak file」，而自研读取器反而读得出来（它按 magic 扫描 +
+校验索引 SHA1），所以这个坑藏了很久。现在写入器强制补齐，并有测试锁住。
+
+**🔧 修一个误报**：Zlib / Gzip 是 UE 内核自带的压缩方式，**任何版本的游戏都读得了**。
+以前把「模组用 Zlib、本体用 Oodle」报成 ✘ 错误（还建议你重打包）——
+实测 Hospital 改压缩方式照样闪退，卡加载不是它造成的。现在改成提示，
+只有「游戏真没有的解码器」（比如第三方插件的 Zstd）才报错。
 
 ### v1.8.0 新增（自动判断「这个模组能不能改」）
 
@@ -316,7 +344,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="发布 exe 到 GitHub Releases")
     ap.add_argument("--user", required=True)
     ap.add_argument("--repo", default="ron-pak-tools")
-    ap.add_argument("--tag", default="v1.8.0")
+    ap.add_argument("--tag", default="v1.9.0")
     ap.add_argument("--name", default=None, help="Release 标题（默认同 tag）")
     ap.add_argument("--exe", default=os.path.join("dist", EXE_NAME))
     ap.add_argument("--dry-run", action="store_true")
