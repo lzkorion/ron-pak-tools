@@ -104,7 +104,10 @@ def main():
         print("\n4) 日志内容断言")
         check("SyntheticMod_P.pak" in log, "日志含模组标题")
         check("结论：" in log, "日志给出结论")
-        check("Broken_P.pak" in log and "无法处理" in log, "坏文件判为「无法处理」")
+        check("Broken_P.pak" in log
+              and ("读不了" in log or "无法处理" in log),
+              "坏文件被判为「读不了/无法处理」")
+        check("先诊断" in log or "诊断结论" in log, "先跑了诊断再转换")
         check("汇总" in log, "含汇总")
         check("输出目录" in log, "含输出目录")
 

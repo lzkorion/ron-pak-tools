@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """RoN 模组转换器 —— 图形界面版
 
@@ -207,7 +207,7 @@ def save_config(cfg: dict) -> None:
 def _worker(mod_dir: str, outdir: str, manifest: str | None,
             verify: bool, strip_all: bool, match_name: bool,
             strip_modified: bool, health_only: bool, repack_raw: bool,
-            game_paks: str | None, q) -> None:
+            assess_first: bool, game_paks: str | None, q) -> None:
     """在子进程中执行转换，通过 q 回传消息。
 
     消息格式: (kind, payload)
@@ -350,8 +350,55 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                 q.put(("result", summary[-1]))
                 q.put(("prog", (done, total, _os.path.basename(src))))
         else:
+            # ---- 先诊断再转换：不推荐转的直接跳过，不产出文件 ----
+            skip: set[str] = set()
+            if assess_first:
+                try:
+                    import ronhealth as RH
+                except Exception as ex:
+                    log(f"⚠ 无法加载诊断模块，改为全部转换：{ex}")
+                else:
+                    log("先诊断：逐个判断「能不能改、值不值得改」，只转该转的")
+                    log("=" * 70)
+                    ares = []
+                    for i, src in enumerate(paks, 1):
+                        q.put(("prog", (i - 1, total, _os.path.basename(src))))
+                        try:
+                            a = RH.assess(src, official, paks_dir=game_paks,
+                                          verify=False)
+                        except Exception as ex:
+                            a = {"name": _os.path.basename(src), "label": "读不了",
+                                 "why": f"{type(ex).__name__}: {ex}",
+                                 "reasons": [], "should_convert": False,
+                                 "health": {"ok": False, "findings": []}}
+                        RH.render_assess(a, log=log)
+                        ares.append(a)
+                        if not a["should_convert"]:
+                            skip.add(src)
+                    RH.print_assess_table(ares, log=log)
+                    log("")
+                    log(f"诊断完毕：{total - len(skip)} 个建议转换，"
+                        f"{len(skip)} 个跳过（转了也没用，甚至更糟）")
+                    log("=" * 70)
+                    if not skip:
+                        log("（没有需要跳过的）")
+
             for i, src in enumerate(paks, 1):
                 q.put(("prog", (i - 1, total, _os.path.basename(src))))
+                if src in skip:
+                    log("")
+                    log(f"── {_os.path.basename(src)}")
+                    log("   ⏭ 诊断判定不需要转换（也没生成文件）")
+                    done += 1
+                    summary.append({
+                        "name": _os.path.basename(src), "verdict": "诊断后跳过",
+                        "action": "保持原样（诊断认为转换没有意义）", "out": "",
+                        "dropped": 0, "kept": 0, "ok": True,
+                        "problems": [],
+                    })
+                    q.put(("result", summary[-1]))
+                    q.put(("prog", (done, total, _os.path.basename(src))))
+                    continue
                 try:
                     d = RC.diagnose(src, official, strip_all=strip_all,
                                     match_name=match_name,
@@ -532,21 +579,28 @@ class App:
             text="体检模式：只诊断「为什么这个模组装了没效果」，不生成任何文件"
         ).grid(row=4, column=0, sticky="w")
 
+        self.assess_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opt, variable=self.assess_var,
+            text="先诊断再转换（推荐）：先判断这个模组能不能改、值不值得改，"
+                 "只转该转的"
+        ).grid(row=5, column=0, sticky="w")
+
         self.raw_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             opt, variable=self.raw_var,
             text="改压缩方式为不压缩：用于模组压缩方式和游戏不一致导致卡加载"
                  "（包会变大）"
-        ).grid(row=5, column=0, sticky="w")
+        ).grid(row=6, column=0, sticky="w")
 
         self.genman_var = tk.BooleanVar(value=False)
         chk = ttk.Checkbutton(
             opt, variable=self.genman_var,
             text="先生成官方资产清单（首次使用必做；游戏更新后重新生成）")
-        chk.grid(row=6, column=0, sticky="w")
+        chk.grid(row=7, column=0, sticky="w")
         self.game_var = tk.StringVar(value="游戏目录识别中…")
         ttk.Label(opt, textvariable=self.game_var,
-                  foreground="#666").grid(row=7, column=0, sticky="w", pady=(4, 0))
+                  foreground="#666").grid(row=8, column=0, sticky="w", pady=(4, 0))
 
         # ---- 按钮 ----
         bar = ttk.Frame(root, padding=(14, 6))
@@ -625,6 +679,8 @@ class App:
             self.health_var.set(bool(self.cfg["health_only"]))
         if "repack_raw" in self.cfg:
             self.raw_var.set(bool(self.cfg["repack_raw"]))
+        if "assess_first" in self.cfg:
+            self.assess_var.set(bool(self.cfg["assess_first"]))
         if autostart and last and os.path.isdir(last):
             self.root.after(400, self.start)
 
@@ -782,7 +838,8 @@ class App:
                          "match_name": bool(self.match_name_var.get()),
                          "strip_modified": bool(self.strip_modified_var.get()),
                          "health_only": bool(self.health_var.get()),
-                         "repack_raw": bool(self.raw_var.get())})
+                         "repack_raw": bool(self.raw_var.get()),
+                         "assess_first": bool(self.assess_var.get())})
         save_config(self.cfg)
 
         self.running = True
@@ -806,7 +863,8 @@ class App:
                       bool(self.match_name_var.get()),
                       bool(self.strip_modified_var.get()),
                       bool(self.health_var.get()),
-                      bool(self.raw_var.get()), game_paks, self.q),
+                      bool(self.raw_var.get()),
+                      bool(self.assess_var.get()), game_paks, self.q),
                 daemon=True)
             self.proc.start()
         except Exception as ex:
@@ -902,6 +960,20 @@ class App:
                    f"{n_err} 个发现问题。\n\n"
                    f"详细结论在日志里（✘ 开头的就是问题所在）。\n"
                    f"没有修改、也没有生成任何文件。")
+            self._finish(ok=True, msg=None)
+            messagebox.showinfo(APP_TITLE, msg)
+            return
+        skipped = b.get("诊断后跳过", 0)
+        if skipped:
+            msg = (f"诊断 + 转换完成。\n\n"
+                   f"共 {info.get('total', 0)} 个 pak：\n"
+                   f"  · {good - skipped} 个转换了，产物在：\n{self.outdir}\n"
+                   f"  · {skipped} 个诊断判定【不需要转换】，已跳过、"
+                   f"没有生成文件\n"
+                   f"    （它们原样用就行，转了反而可能变糟）\n\n"
+                   f"注意：原文件没有被修改。")
+            if b.get("无法处理"):
+                msg += f"\n\n有 {b['无法处理']} 个 pak 无法处理，请看日志。"
             self._finish(ok=True, msg=None)
             messagebox.showinfo(APP_TITLE, msg)
             return
@@ -1037,7 +1109,7 @@ def _selftest(moddir: str, verify: bool = False) -> int:
     q = ctx.Queue()
     proc = ctx.Process(target=_worker,
                        args=(moddir, outdir, man, verify, False, False, False,
-                             False, False, None, q),
+                             False, False, False, None, q),
                        daemon=True)
     proc.start()
 

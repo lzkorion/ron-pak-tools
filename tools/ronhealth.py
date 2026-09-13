@@ -176,21 +176,25 @@ def check(src: str, official: RC.OfficialAssets | None = None, *,
             "数字越大越优先（后挂载的覆盖先挂载的）")
 
     # ---------- 2. 挂载点是否存在 ----------
+    # ★ 注意：纯新增内容的模组（新地图、新武器）可以用一套【全新的命名空间】，
+    #   官方清单里当然找不到 —— 那是正常的，不是错误。
+    #   只有「想覆盖官方、却挂到了游戏不访问的目录」才是真的错。
     root = mount_root(mount)
+    top = root.split("/")[0] if root else ""
     if not mount.strip("/"):
         add(LEVEL_WARN, "挂载点是空的", "条目没有挂到任何目录下")
     elif not root:
         add(LEVEL_OK, "挂载点 = 游戏根 `../../../`")
+    elif top not in ("readyornot", "engine"):
+        add(LEVEL_ERROR, f"挂载点不在游戏命名空间里：{root}",
+            f"第一层是 {top!r}，游戏只从 ReadyOrNot/ 和 Engine/ 下读内容",
+            "挂载点要形如 ../../../ReadyOrNot/Content/")
     elif official is not None and official.has_full_index:
         prefixed = sum(1 for f in official.full if f.startswith(root + "/"))
         if prefixed:
             add(LEVEL_OK, f"挂载点在游戏里存在（{prefixed:,} 条官方路径在它下面）")
         else:
-            add(LEVEL_ERROR, f"挂载点在游戏里【不存在】：{root}",
-                "没有任何官方资产落在这个目录下",
-                "模组的所有条目都挂在一个游戏从不访问的目录上 → 装了必然无效。"
-                "挂载点应该是「包住全部内容的最深目录」的下拉框，"
-                "通常形如 ../../../ReadyOrNot/Content/")
+            r["mount_unknown"] = True     # 先记下，等算完覆盖数再定性
     else:
         add(LEVEL_INFO, f"挂载点 {root or '(游戏根)'}",
             "（没有官方清单，无法确认它是否存在）")
@@ -220,10 +224,21 @@ def check(src: str, official: RC.OfficialAssets | None = None, *,
         add(LEVEL_INFO, f"游戏里没有的新路径 {len(new)} 条",
             "" if not new else "例：" + "、".join(sorted(new)[:3]))
         if not over:
+            if r.get("mount_unknown"):
+                add(LEVEL_WARN,
+                    f"挂载点在官方清单里找不到，而且这个模组【不覆盖任何官方资产】",
+                    "整套内容都在一个官方没有的命名空间下",
+                    "如果它本来就是新地图/新武器之类的纯新增模组，这是正常的；"
+                    "如果它本该替换官方内容，那就是挂错地方了")
             add(LEVEL_WARN, "一条都没对上官方路径（纯新增内容的模组可忽略）",
                 f"{len(new)} 条全是游戏里不存在的新路径",
                 "如果它本该替换贴图/模型/蓝图/数据表，说明打包时的目录结构没对上游戏；"
                 "如果本来就是新地图/新武器之类的纯新增模组，这条是正常的")
+        elif r.get("mount_unknown"):
+            add(LEVEL_ERROR, f"挂载点不在任何官方路径下，但模组又在覆盖官方：{root}",
+                f"有 {len(over)} 条能对上官方路径（靠路径变体救回来的）",
+                "挂载点选错了。它应该是「包住全部内容的最深目录」，"
+                "通常形如 ../../../ReadyOrNot/Content/")
         elif len(over) < max(1, len(rels) // 100):
             add(LEVEL_WARN, f"覆盖的资产很少（{len(over)}/{len(rels)}）",
                 "大部分内容游戏里没有对应项",
@@ -294,6 +309,18 @@ def check(src: str, official: RC.OfficialAssets | None = None, *,
             "UE 里两者通常成对出现，缺一半可能读不出来")
     if not orphans and not missing:
         add(LEVEL_OK, f"资产成组完整（{len(groups)} 个资产，无孤儿/缺件）")
+
+    # ---------- 5a. 地图模组：转换救不了 ----------
+    r["is_map"] = any(x.lower().endswith(".umap") for x in rels)
+    if r["is_map"]:
+        umaps = [x for x in rels if x.lower().endswith(".umap")]
+        add(LEVEL_WARN, "这是地图模组 —— 转换（剥资产）救不了它",
+            "、".join(umaps[:3]),
+            "自定义地图每次游戏大版本更新都必须由作者【重新烤】。"
+            "官方 Boiling Point 更新日志点名过："
+            "BP_Reportable_Actor_V3 里的语音节点被删掉了，"
+            "未更新的关卡会崩溃。卡加载/闪退基本都是这个原因，"
+            "重新打包改变不了任何东西 —— 只能等作者更新或换图。")
 
     # ---------- 5b. 压缩方式必须和游戏一致 ----------
     mine_methods = [m for m in pk.compression_methods if m]
@@ -398,6 +425,147 @@ def render(r: dict, log=None) -> None:
     emit(f"   ── 结论：{r['verdict']}")
 
 
+# ---------------------------------------------------------------------------
+# 先诊断再转换：这个模组到底能不能转、值不值得转？
+# ---------------------------------------------------------------------------
+VERDICTS = {
+    "convert":  ("可以转换", "有该剥的照抄官方资产，转换有用"),
+    "no_change": ("不用转换", "没有可剥的内容，原样用就行"),
+    "do_not":   ("不建议转换", "官方同路径的资产全是模组自己改过的，转换剥不到东西，"
+                              "强行剥反而会毁掉模组"),
+    "blocked":  ("转换也修不好", "结构上有硬伤，转换解决不了，得先修那些问题"),
+    "delete":   ("该删掉", "内容已全部被官方取代"),
+    "unreadable": ("读不了", "不是合法 pak"),
+}
+
+
+def assess(src: str, official: RC.OfficialAssets | None = None, *,
+           paks_dir: str | None = None, peers: list[dict] | None = None,
+           verify: bool = False, log=None) -> dict:
+    """先诊断：给出「该不该转换」的结论，然后再决定要不要转。
+
+    返回 dict：{verdict, label, why, reasons[], should_convert, health, diag}
+    """
+    emit = log or (lambda *_a, **_k: None)
+    h = check(src, official, paks_dir=paks_dir, peers=peers, verify=verify)
+    out = {"src": src, "name": h["name"], "ok": h["ok"], "health": h,
+           "reasons": [], "diag": None}
+
+    def finish(code):
+        label, why = VERDICTS[code]
+        out["verdict"] = code
+        out["label"] = label
+        out["why"] = why
+        out["should_convert"] = (code == "convert")
+        return out
+
+    # ---- 1. 读不了 ----
+    if not h["ok"]:
+        out["reasons"].append(f"读不了：{h.get('error', '')}")
+        return finish("unreadable")
+
+    # ---- 2. 转换修不了的结构硬伤 ----
+    blockers = []
+    for f in h["findings"]:
+        t = f["title"]
+        if f["level"] != LEVEL_ERROR:
+            continue
+        if "挂载点不在游戏命名空间里" in t or "挂载点不在任何官方路径下" in t:
+            blockers.append(t.split("：")[0] + " —— 模组的资产挂在游戏从不访问的目录上")
+        elif "不是 `_P.pak` 结尾" in t:
+            blockers.append("文件名不是 _P.pak 结尾 —— 很可能根本不加载")
+        elif "孤儿条目" in t:
+            blockers.append("有孤儿条目（只有 .uexp/.ubulk 没有 .uasset）—— "
+                            "转换只会剥不会补，修不了")
+        elif "头部魔数不对" in t:
+            blockers.append("包内容不是合法 UE 包 —— 转换修不了")
+        elif "覆盖" in t and "被 " in t:
+            blockers.append(t + " —— 换个 pakchunk 号比转换更管用")
+    if blockers:
+        out["reasons"].extend(blockers)
+        return finish("blocked")
+
+    # ---- 3. 转换到底会做什么 ----
+    if official is None or not official.has_full_index:
+        out["reasons"].append("没有官方清单，判断不了转换会剥掉什么")
+        return finish("blocked")
+
+    d = RC.diagnose(src, official, verbose=False)
+    if not d.ok:
+        out["reasons"].append(f"诊断失败：{d.error}")
+        return finish("unreadable")
+    out["diag"] = {
+        "entries": d.total_entries, "recovered": d.recovered,
+        "dropped": d.dropped, "kept": d.kept,
+        "matched_full": d.matched_full, "matched_bare": d.matched_bare,
+        "kept_modified": len(d.kept_modified),
+        "kept_modified_paths": [r for _s, r, _m, _o in d.kept_modified][:8],
+    }
+
+    if d.recovered < d.total_entries:
+        out["reasons"].append(
+            f"只解析出 {d.recovered}/{d.total_entries} 条路径 —— 转换会丢文件，"
+            f"工具已拒绝重新打包")
+        return finish("blocked")
+
+    if d.kept == 0 and d.dropped > 0:
+        out["reasons"].append(f"剥离 {d.dropped} 条后一条不剩")
+        return finish("delete")
+
+    if d.dropped > 0:
+        out["reasons"].append(
+            f"会剥掉 {d.dropped} 条「和官方一模一样（照抄）」的资产 —— "
+            f"这正是转换要干的事，剥掉零损失")
+        if d.kept_modified:
+            out["reasons"].append(
+                f"同时保留 {len(d.kept_modified)} 个模组自己改过的资产（不会误伤）")
+        return finish("convert")
+
+    if d.kept_modified:
+        out["reasons"].append(
+            f"官方已有同路径的资产有 {len(d.kept_modified)} 个，但它们"
+            f"【全都是模组自己改过的】—— 那是模组的功能本身，不能剥")
+        out["reasons"].append("没有任何「照抄官方」的资产需要清理")
+        return finish("do_not")
+
+    out["reasons"].append("没有可剥的内容（没有和官方同路径的照抄资产）")
+    return finish("no_change")
+
+
+def render_assess(a: dict, log=None) -> None:
+    """打印「先诊断再转换」的结论。"""
+    emit = log or print
+    emit("")
+    emit(f"── {a['name']}")
+    if a.get("health", {}).get("ok"):
+        h = a["health"]
+        for f in h["findings"]:
+            if f["level"] in (LEVEL_ERROR, LEVEL_WARN):
+                emit(f"   {_ICON[f['level']]} {f['title']}")
+                if f.get("hint"):
+                    emit(f"      → {f['hint']}")
+    for r in a["reasons"]:
+        emit(f"   · {r}")
+    emit(f"   ── 诊断结论：【{a['label']}】{a['why']}")
+
+
+def print_assess_table(results, log=None) -> None:
+    """汇总表：哪些该转、哪些不用转、哪些转了也没用。"""
+    emit = log or print
+    emit("")
+    emit("=" * 66)
+    emit("诊断汇总")
+    buckets: dict[str, list[str]] = {}
+    for a in results:
+        buckets.setdefault(a["label"], []).append(a["name"])
+    for label in ("可以转换", "不用转换", "不建议转换", "转换也修不好",
+                  "该删掉", "读不了"):
+        if label in buckets:
+            emit(f"   {label:<10} {len(buckets[label])} 个")
+            for n in buckets[label]:
+                emit(f"        {n}")
+
+
 def main() -> int:
     for s in ("stdout", "stderr"):
         f = getattr(sys, s, None)
@@ -416,6 +584,9 @@ def main() -> int:
                     help="游戏 Paks 目录（用来查加载顺序冲突；默认自动找）")
     ap.add_argument("--verify", action="store_true",
                     help="额外调用官方 UnrealPak -List/-Test")
+    ap.add_argument("--assess", action="store_true",
+                    help="先诊断再转换：只回答「这个模组能不能转、值不值得转」，"
+                         "不改任何文件")
     ap.add_argument("--json", default=None, help="把结果写入 JSON")
     args = ap.parse_args()
 
@@ -444,12 +615,39 @@ def main() -> int:
         print(f"游戏 Paks：{paks_dir}")
     print("=" * 78)
 
-    paks = RC.find_paks(args.target)
-    if not paks:
+    all_paks = RC.find_paks(args.target)
+    if not all_paks:
         print(f"没找到 .pak：{args.target}")
         return 1
+    # 体检/诊断只针对【模组】。游戏本体 pak（pakchunkN-Windows.pak）不是模组，
+    # 拿「必须有 _P 后缀」之类的规则去套它们全是误报。
+    paks = [p for p in all_paks if not RC.is_official_pak(os.path.basename(p))]
+    skipped = len(all_paks) - len(paks)
+    if skipped:
+        print(f"（跳过 {skipped} 个游戏本体 pak —— 体检只针对模组）")
+    if not paks:
+        print("这个目录里没有模组 pak（只有游戏本体）")
+        return 0
 
     results = []
+    if args.assess:
+        # 先诊断再转换：只给结论，不改文件
+        ares = []
+        for src in paks:
+            a = assess(src, official, paks_dir=paks_dir, verify=args.verify)
+            render_assess(a)
+            ares.append(a)
+        print_assess_table(ares)
+        n_conv = sum(1 for a in ares if a["should_convert"])
+        print(f"\n其中 {n_conv} 个建议转换；其余的转了也没用，甚至会更糟。")
+        if args.json:
+            import json
+            with open(args.json, "w", encoding="utf-8") as f:
+                json.dump([{k: v for k, v in a.items() if k != "health"}
+                           for a in ares], f, ensure_ascii=False, indent=2)
+            print(f"\n报告已写入 {args.json}")
+        return 0
+
     for src in paks:
         r = check(src, official, paks_dir=paks_dir, verify=args.verify)
         render(r)
