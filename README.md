@@ -150,6 +150,36 @@ v1.0.0 用文件名判定「官方已有」→ 把模组自己的贴图/网格�
 > 这条原则在代码注释、测试（`tests/test_safety.py`）和本文档里都有，
 > 有测试保护，别再改回去。
 
+### ★ 路径一致 ≠ 内容一致（v1.0.2 起会提示）
+
+就算路径完全一致，也只能说明「指向同一个资产」，**不代表内容一样**。
+模组完全可能**故意改过**某个蓝图/数据表（血腥 mod 改 `Blood_Standard` 就是这样）。
+
+所以清单里额外存一份官方条目的**未压缩原始大小**，剥离前比一比：
+
+```
+⚠ 其中 2 个被剥条目的内容和官方【不一样】（可能是模组故意改的，剥掉会丢掉这些改动；仍然照剥）：
+     ReadyOrNot/Data/Blood_Standard.uasset   模组 11,663B / 官方 10,023B
+     ReadyOrNot/Data/Blood_Standard.uexp     模组   616B / 官方    612B
+```
+
+- **大小相同** → 基本就是照抄官方，剥掉不会有任何损失
+- **大小不同** → 模组改过它，剥掉会丢掉那些改动
+
+★ 这一条**只提示，不改变剥离行为** —— 默认策略该剥还是剥，由你自己看着办。
+需要更保守的话加 `--strip-all` 的反面（也就是什么都不加）手动核对这几个路径。
+
+实测四个真实模组：
+
+| 模组 | 被剥条目 | 其中内容与官方不同 |
+|---|---|---|
+| Restoration | 8 | 4（`.uexp` 各差 2~8 字节） |
+| VisceralBlud | 4 | 2（`Blood_Standard` 差 1,640 字节） |
+| VisceralGore | 0 | — |
+| wound | 0 | — |
+
+早期清单没有 `sizes` 段也能用，只是少了这层提示。
+
 ### 清单生成：现在只要几秒
 
 v1.0.0 生成清单要把每个本体 pak 整份读进内存（`pakchunk0` 有 24 GB），
@@ -297,6 +327,27 @@ Since v1.0.1:
   names that occur in more than one directory
 * A manifest containing only bare file names now produces an explicit error
   instead of silently doing nothing
+
+### ★ Same path ≠ same content (warned about since v1.0.2)
+
+An identical path only proves the mod points at the *same asset* — not that the
+content is the same. A mod may deliberately modify a blueprint or data table
+(a gore mod editing `Blood_Standard`, for example).
+
+The manifest therefore also records each official entry's **uncompressed size**,
+and the tool compares it before stripping:
+
+```
+⚠ 2 stripped entries differ in content from the official version
+  (the mod may have edited them; stripped anyway):
+     ReadyOrNot/Data/Blood_Standard.uasset   mod 11,663B / official 10,023B
+```
+
+- **Same size** → almost certainly a verbatim copy of the official asset, safe to strip
+- **Different size** → the mod edited it, so stripping loses those edits
+
+★ This is a **warning only** — it does not change what gets stripped.
+Manifests generated before v1.0.2 lack the `sizes` section and simply skip this check.
 
 ### Manifest generation is now fast
 

@@ -129,6 +129,45 @@ def main():
     for rel in FX.KEEP_ASSETS:
         check(rel not in d5._drop, f"贴图仍然保留: {rel}")
 
+    # ------------------------------------------------------------------
+    print("\n4) 「内容和官方不一样」的提示（只警告，不改变剥离）")
+    print("   官方那份和模组不同 → 应该提示，但剥离结果不变")
+    check(len(d2.size_mismatch) == len(FX.CONFLICT_ASSETS),
+          f"4 个被剥的蓝图/数据都被标出内容不同（{len(d2.size_mismatch)}）")
+    for rel, msz, osz in d2.size_mismatch:
+        check(msz != osz, f"{rel.rsplit('/',1)[-1]}: 模组 {msz}B != 官方 {osz}B")
+    check(any("内容和官方不一样" in a for a in d2.actions),
+          "结论里给出了这条提示")
+    check(d2.dropped == 4, f"剥离行为没变（仍然剥 4 条，实际 {d2.dropped}）")
+
+    print("   官方那份和模组逐字节一样 → 不该有任何提示")
+    paks2 = os.path.join(WORK, "gamepaks_same")
+    os.makedirs(paks2, exist_ok=True)
+    FX.make_official_pak_like_real(os.path.join(paks2, "pakchunk1-Windows.pak"),
+                                   identical=True)
+    man2 = os.path.join(WORK, "same_manifest.json")
+    RC.build_manifest_from_game_paks(paks2, man2, verbose=False)
+    off2 = RC.OfficialAssets(man2)
+    check(bool(off2.sizes), f"清单带上了大小信息（{len(off2.sizes)} 条）")
+    # 模组内容和「官方」那份逐字节一样（都和 default_files() 相同）
+    mod_same = FX.make_pak(os.path.join(WORK, "Identical_P.pak"),
+                           {"ReadyOrNot/Content/" + rel: blob
+                            for rel, blob in FX.default_files().items()})
+    d6 = RC.diagnose(mod_same, off2, verbose=False)
+    check(d6.dropped == len(FX.CONFLICT_ASSETS),
+          f"照旧剥离（{d6.dropped} 条）")
+    check(d6.size_mismatch == [],
+          f"内容一致 -> 无提示（实际 {d6.size_mismatch}）")
+
+    print("   老清单没有 sizes 段 -> 不报错、只是没有这层提示")
+    old_man = FX.write_manifest(os.path.join(WORK, "oldschool.json"),
+                                FX.official_paths())
+    off3 = RC.OfficialAssets(old_man)
+    check(off3.sizes == {}, "没有大小信息")
+    d7 = RC.diagnose(mod2, off3, verbose=False)
+    check(d7.size_mismatch == [] and d7.dropped == len(FX.CONFLICT_ASSETS),
+          "老清单下照常剥离、不误报")
+
     print(f"\n=== 安全底线测试 {'PASS' if not fails else 'FAIL ' + str(fails)} ===")
     return 0 if not fails else 1
 

@@ -185,6 +185,7 @@ class OfficialAssets:
         self.full: set[str] = set()
         self.bare: set[str] = set()
         self.bare_ambiguous: set[str] = set()   # 同名但出现在多个目录 → 更不可信
+        self.sizes: dict[str, int] = {}         # 全路径 -> 官方条目的未压缩大小
         self.source = "(未加载)"
         self.generated_at: float | None = None
         self._name_count: dict[str, int] = {}   # 裸名出现次数，用来判歧义
@@ -256,7 +257,15 @@ class OfficialAssets:
             self._name_count[b] = c
             if c > 1:
                 self.bare_ambiguous.add(b)   # 同名出现在多处 → 不敢剥
-        self.source = f"{path}（{len(names)} 条，全路径 {len(self.full)} 条）"
+        # 可选：与 names 一一对应的未压缩大小（老清单没有这一段）
+        sizes = data.get("sizes")
+        if isinstance(sizes, list) and len(sizes) == len(names):
+            for n, sz in zip(names, sizes):
+                s = self._normalize(n)
+                if s and isinstance(sz, int) and sz >= 0:
+                    self.sizes[s] = sz
+        self.source = (f"{path}（{len(names)} 条，全路径 {len(self.full)} 条"
+                       + (f"，含大小信息" if self.sizes else "") + "）")
 
     def add_paths(self, paths) -> None:
         """加入【官方命名空间下的全路径】（= 挂载点 + 挂载内相对路径）。
@@ -276,6 +285,10 @@ class OfficialAssets:
             self._name_count[b] = c
             if c > 1:
                 self.bare_ambiguous.add(b)
+
+    def size_of(self, full_path: str) -> int | None:
+        """官方条目在该路径上的【未压缩原始大小】；清单里没有大小信息则 None。"""
+        return self.sizes.get(self._normalize(full_path))
 
     def has(self, full_path: str) -> tuple[bool, str]:
         """返回 (是否官方已有, 命中方式: full / bare / '')。"""
@@ -358,8 +371,12 @@ def build_manifest_from_game_paks(paks_dir: str, out_json: str,
         try:
             pk = P.read_pak_index(path)
             mount = pk.mount_point
-            official.add_paths(OfficialAssets.full_path_of(mount, p)
-                               for p in pk.all_paths())
+            pairs = [(OfficialAssets.full_path_of(mount, rel), unc)
+                     for rel, unc in pk.all_paths_with_sizes()]
+            official.add_paths(p for p, _ in pairs)
+            for p, unc in pairs:
+                if unc >= 0:
+                    official.sizes[p] = unc
             del pk
             if verbose:
                 _emit_default(verbose, f" 累计 {len(official)}")
@@ -373,7 +390,7 @@ def build_manifest_from_game_paks(paks_dir: str, out_json: str,
         "pak_count": len(files),
         "skipped_paks": skipped,
         "generated_by": "ronconvert.build_manifest_from_game_paks",
-    })
+    }, sizes=official.sizes)
     if verbose:
         _emit_default(
             verbose,
@@ -387,14 +404,25 @@ def _emit_default(verbose: bool, msg: str, **kw) -> None:
         print(msg, **kw)
 
 
-def write_manifest(path: str, names, extra: dict | None = None) -> None:
-    """写清单 JSON，并记下生成时间（用于判断清单是否过期）。"""
+def write_manifest(path: str, names, extra: dict | None = None,
+                   sizes: dict | None = None) -> None:
+    """写清单 JSON，并记下生成时间（用于判断清单是否过期）。
+
+    sizes: 可选的 {全路径: 未压缩原始大小}。有它才能在被剥资产
+           「内容和官方不一样」时提醒用户（见 diagnose 的 size_mismatch）——
+           没有也不影响判定，只是少了这层提示。
+    """
+    ordered = sorted(set(names))
     data = {
         "generated_at": time.time(),
         "generated_at_str": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "count": len(names),
-        "names": sorted(names),
+        "count": len(ordered),
+        "names": ordered,
     }
+    if sizes:
+        # 与 names 一一对应的数组：比 {路径: 大小} 的 JSON 小得多
+        # （47 万条时约 4 MB vs 15 MB），加载也快。
+        data["sizes"] = [int(sizes.get(n, -1)) for n in ordered]
     if extra:
         data.update(extra)
     with open(path, "w", encoding="utf-8") as f:
@@ -601,6 +629,8 @@ class Diagnosis:
     copied: bool = False          # 无需改动，原样复制
     matched_full: int = 0         # 路径完全一致（可信）
     matched_bare: int = 0         # 仅文件名相同（存疑，默认不剥）
+    size_mismatch: list = field(default_factory=list)
+    # ↑ [(rel, 模组大小, 官方大小), ...]：会被剥、但内容和官方【不一样】
     # 内部工作数据（不参与序列化）
     _elist: list = field(default_factory=list, repr=False)
     _drop: set = field(default_factory=set, repr=False)
@@ -763,17 +793,45 @@ def diagnose(src: str, official: OfficialAssets, *, strip_all: bool = False,
     d.dropped = len(drop)
     d.kept = d.total_entries - d.dropped
 
+    # ---- 内容一致性提示 ----------------------------------------------------
+    # 路径一致只说明「指向同一个资产」，不代表「内容一样」。
+    # 比一比未压缩原始大小：一致基本就是照抄官方（剥掉无损失）；
+    # 不一致说明模组可能**故意改过**这个资产，剥掉会丢掉那些改动 ——
+    # 这时只提醒，不改变剥离行为（默认策略仍然照剥，用户自己决定）。
+    d.size_mismatch = []
+    for rel in sorted(drop):
+        e = by_rel.get(rel)
+        if e is None or e.official_by != "full":
+            continue
+        osz = official.size_of(e.full)
+        if osz is None:                 # 清单没带大小信息，跳过
+            continue
+        msz = e.path.uncompressed_size
+        if msz != osz:
+            d.size_mismatch.append((rel, msz, osz))
+
     emit(f"   版本 {d.version}   挂载点 {d.mount!r}   方法 {d.methods}")
     emit(f"   条目 {d.total_entries}（恢复路径 {d.recovered}）")
     emit(f"   官方匹配：路径一致 {d.matched_full} 条（可信）"
          f"  仅同名 {d.matched_bare} 条（存疑，默认不剥）")
     for p in d.problems:
         emit(f"   ⚠ {p}")
+    if d.size_mismatch:
+        emit(f"   ⚠ 其中 {len(d.size_mismatch)} 个被剥条目的内容和官方【不一样】"
+             f"（可能是模组故意改的，剥掉会丢掉这些改动；仍然照剥）：")
+        for rel, msz, osz in d.size_mismatch[:5]:
+            emit(f"        {rel}   模组 {msz:,}B / 官方 {osz:,}B")
+        if len(d.size_mismatch) > 5:
+            emit(f"        ... 其余 {len(d.size_mismatch)-5} 个")
 
     if d.dropped == 0:
         d.actions.append("无可剥离内容（内容都该保留）")
     else:
         d.actions.append(f"剥离 {d.dropped} 个冲突条目，保留 {d.kept} 个")
+    if d.size_mismatch:
+        d.actions.append(
+            f"提示：{len(d.size_mismatch)} 个被剥条目的内容和官方不一样"
+            f"（可能是模组自己改过的），已照剥 —— 进游戏留意一下相关表现")
     if d.kept == 0:
         d.problems.append("剥离后无剩余内容：该模组的冲突部分已被官方完全取代")
 
@@ -1041,6 +1099,9 @@ def main() -> int:
                 "out_bytes": d.out_bytes, "actions": d.actions,
                 "problems": d.problems, "verify": d.verify,
                 "dropped_paths": sorted(getattr(d, "_drop", [])),
+                "matched_full": d.matched_full, "matched_bare": d.matched_bare,
+                "size_mismatch": [{"path": r, "mod_bytes": m, "official_bytes": o}
+                                  for r, m, o in d.size_mismatch],
             } for d in results], f, ensure_ascii=False, indent=2)
         print(f"\n报告已写入 {args.json}")
 

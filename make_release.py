@@ -4,7 +4,7 @@
 
 用法（token 只用于这一次，不会写进任何文件）：
     set GITHUB_TOKEN=ghp_xxxx
-    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.0.1
+    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.0.2
 
 会做：
   1. 发布前合规检查（exe 内不得含游戏数据 / Epic 工具）
@@ -97,7 +97,7 @@ game installation. It is written only on your machine and never uploaded.
 - 可选调用你本机的 UnrealPak 做 `-List` / `-Test` 复核
 - **原始模组文件不会被修改**，结果输出到 `converted` 子目录
 
-## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.0.1
+## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.0.2
 
 v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常多写一层
 `ReadyOrNot/`（挂载点里已经有了），于是和官方永远「同路径匹配不上」、
@@ -129,6 +129,14 @@ v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常
 
 已用四个真实模组端到端复核：官方 `UnrealPak -List` / `-Test` 全部 rc=0，
 孤儿 0、缺件 0、新增 0、挂载点不变。
+
+### v1.0.2 新增
+
+- **「路径一致 ≠ 内容一致」提示**：清单里额外记录官方条目的未压缩原始大小，
+  剥离前比一比。大小不同说明模组**故意改过**这个资产，剥掉会丢掉那些改动 ——
+  日志和结论里会点名列出（例：`Blood_Standard` 模组 11,663B / 官方 10,023B）。
+  ★ 只提示，**不改变剥离行为**。
+- 由 v1.0.1 生成、没有大小信息的旧清单照样能用，只是少了这层提示。
 
 ## 校验和 / Checksum
 
@@ -172,7 +180,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="发布 exe 到 GitHub Releases")
     ap.add_argument("--user", required=True)
     ap.add_argument("--repo", default="ron-pak-tools")
-    ap.add_argument("--tag", default="v1.0.1")
+    ap.add_argument("--tag", default="v1.0.2")
     ap.add_argument("--name", default=None, help="Release 标题（默认同 tag）")
     ap.add_argument("--exe", default=os.path.join("dist", EXE_NAME))
     ap.add_argument("--dry-run", action="store_true")

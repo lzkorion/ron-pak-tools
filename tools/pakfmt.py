@@ -819,6 +819,35 @@ class PakFile:
                 out.append((dname + fname).lstrip("/"))
         return out
 
+    def all_paths_with_sizes(self) -> list[tuple[str, int]]:
+        """[(路径, 未压缩原始大小), ...] —— 全部来自索引，不碰数据区。
+
+        ★ 为什么需要大小：路径一致不代表内容一致。模组可能「故意」改过某个
+          蓝图/数据表（比如血腥 mod 改 Blood_Standard），这时把它的原始大小和
+          官方比一比就能看出来，从而在剥离前提醒用户 —— 大小相同基本就是
+          照抄官方，剥掉不会有任何损失。
+
+        拿不到条目的记 -1（例如 -1 位置越界），调用方自行忽略。
+        大小是【未压缩】的（FPakEntry.UncompressedSize），和压缩方式无关。
+        """
+        idx = self.read_directory_index("fdi")
+        if not idx:
+            idx = self.read_directory_index("phi")
+        loc2entry: dict[int, PakEntry] = {}
+        q = 0
+        for e in self.encoded_entries:
+            loc2entry[q] = e
+            q += len(encode_entry_index(e))
+        for i, e in enumerate(self.non_encodable):
+            loc2entry[-i - 1] = e
+        out = []
+        for dname, files in idx.items():
+            for fname, loc in files.items():
+                e = loc2entry.get(loc)
+                out.append(((dname + fname).lstrip("/"),
+                            e.uncompressed_size if e is not None else -1))
+        return out
+
     def entry_physical_offset(self, e: PakEntry) -> int:
         """Physical position of the FPakEntry header for this entry.
 

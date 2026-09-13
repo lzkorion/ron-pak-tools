@@ -111,16 +111,26 @@ def make_official_pak(path: str) -> str:
     }, mount="../../../")
 
 
-def make_official_pak_like_real(path: str) -> str:
+def make_official_pak_like_real(path: str, identical: bool = False) -> str:
     """造一个「形状和真实本体 pak 一样」的官方 pak。
 
     真实本体 pakchunk0 的挂载点是 '../../../'，路径从 'ReadyOrNot/Content/...' 开始；
     而模组的挂载点是 '../../../ReadyOrNot/Content/'，路径从 'Blueprints/...' 开始。
     两者拼出来的全路径一模一样 —— 这正是 full 匹配能命中的原因。
+
+    identical=False（默认）：官方那份内容和模组不一样（大小也不同）→ 用于测
+                            「内容和官方不一样」的警告。
+    identical=True：内容和模组逐字节一样 → 大小相同 → 不该有任何警告。
     """
-    files = {}
-    for i, rel in enumerate(CONFLICT_ASSETS + KEEP_ASSETS):
-        files["ReadyOrNot/Content/" + rel] = f"official-{i}-".encode() * 25
+    if identical:
+        # 只放「官方已有」的那批（冲突型 + 贴图型），独有内容官方不该有
+        src = default_files()
+        files = {"ReadyOrNot/Content/" + rel: src[rel]
+                 for rel in CONFLICT_ASSETS + KEEP_ASSETS}
+    else:
+        files = {}
+        for i, rel in enumerate(CONFLICT_ASSETS + KEEP_ASSETS):
+            files["ReadyOrNot/Content/" + rel] = f"official-{i}-".encode() * 25
     return make_pak(path, files, mount="../../../")
 
 
