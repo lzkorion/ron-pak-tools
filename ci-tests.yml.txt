@@ -1,0 +1,120 @@
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------
+  # 核心测试：只依赖标准库，不建窗口。Ubuntu 最稳，还能顺便验证跨平台可用性
+  # ------------------------------------------------------------------
+  core:
+    name: core (ubuntu, py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 环境信息
+        run: |
+          python -VV
+          python -c "import sys; print('platform:', sys.platform)"
+
+      - name: 语法检查（所有源文件）
+        run: |
+          python -m compileall -q tools tests ronconvert_gui.py build_gui.py \
+            publish_github.py make_release.py
+
+      - name: 跑核心测试
+        run: python tests/run_all.py --core-only
+
+  # ------------------------------------------------------------------
+  # Windows 上加跑一遍（真实目标平台），并尝试 GUI 测试
+  # ------------------------------------------------------------------
+  windows:
+    name: windows (py${{ matrix.python }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 环境信息
+        run: |
+          python -VV
+
+      - name: 语法检查
+        run: |
+          python -m compileall -q tools tests ronconvert_gui.py build_gui.py `
+            publish_github.py make_release.py
+
+      - name: 跑全部测试（没有桌面时自动跳过 GUI）
+        run: python tests/run_all.py
+
+  # ------------------------------------------------------------------
+  # 合规检查：仓库里绝不能出现游戏数据 / Epic 工具 / 样本 pak
+  # ------------------------------------------------------------------
+  compliance:
+    name: compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 禁止出现的文件
+        run: |
+          set -e
+          echo "检查仓库里不应存在的文件..."
+          # 排除 .git 与测试产物目录（后者被 .gitignore 忽略，不属于仓库内容）
+          PRUNE='-path ./.git -prune -o -path ./tests/_work -prune -o -path ./build -prune -o -path ./dist -prune -o'
+          bad=""
+          for pat in 'game_manifest.json' 'game_manifest_full.json' \
+                     'manifest_local.json' 'game_assets_uasset.txt' \
+                     'mod_assets.json' 'ron_mods_report.json' \
+                     'visceral_paths.json' 'UnrealPak.exe' 'oo2core.dll'; do
+            found=$(find . $PRUNE -name "$pat" -print 2>/dev/null || true)
+            if [ -n "$found" ]; then
+              echo "::error::发现禁止的文件 $pat: $found"
+              bad="$bad $found"
+            fi
+          done
+          bin=$(find . $PRUNE \
+                 \( -name '*.pak' -o -name '*.sig' -o -name '*.ucas' \
+                    -o -name '*.utoc' -o -name '*.exe' -o -name '*.dll' \) \
+                 -print 2>/dev/null || true)
+          if [ -n "$bin" ]; then
+            echo "::error::发现二进制文件: $bin"
+            bad="$bad $bin"
+          fi
+          if [ -n "$bad" ]; then
+            exit 1
+          fi
+          echo "✔ 未发现游戏数据 / Epic 工具 / 二进制"
+
+      - name: 源码里不应内嵌资产清单
+        run: |
+          set -e
+          # 只扫代码与文档，排除 .git
+          if grep -rIl --exclude-dir=.git -E '(manifest_local|game_manifest)[^"]*\.json' \
+               --include='*.py' . | grep -v 'tests/' | grep -v 'publish_github.py' \
+               | grep -v 'build_gui.py' | grep -v 'ronconvert_gui.py'; then
+            echo "::warning::上面的文件提到了清单文件名，请确认不是内嵌数据"
+          fi
+          echo "✔ 检查完成"
