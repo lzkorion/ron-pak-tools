@@ -150,35 +150,45 @@ v1.0.0 用文件名判定「官方已有」→ 把模组自己的贴图/网格�
 > 这条原则在代码注释、测试（`tests/test_safety.py`）和本文档里都有，
 > 有测试保护，别再改回去。
 
-### ★ 路径一致 ≠ 内容一致（v1.0.2 起会提示）
+### ★★ 路径一致 ≠ 内容一致（v1.1.0 起：改过的一律保留）
 
 就算路径完全一致，也只能说明「指向同一个资产」，**不代表内容一样**。
-模组完全可能**故意改过**某个蓝图/数据表（血腥 mod 改 `Blood_Standard` 就是这样）。
+而这两件事的处理方式**完全相反**：
 
-所以清单里额外存一份官方条目的**未压缩原始大小**，剥离前比一比：
-
-```
-⚠ 其中 2 个被剥条目的内容和官方【不一样】（可能是模组故意改的，剥掉会丢掉这些改动；仍然照剥）：
-     ReadyOrNot/Data/Blood_Standard.uasset   模组 11,663B / 官方 10,023B
-     ReadyOrNot/Data/Blood_Standard.uexp     模组   616B / 官方    612B
-```
-
-- **大小相同** → 基本就是照抄官方，剥掉不会有任何损失
-- **大小不同** → 模组改过它，剥掉会丢掉那些改动
-
-★ 这一条**只提示，不改变剥离行为** —— 默认策略该剥还是剥，由你自己看着办。
-需要更保守的话加 `--strip-all` 的反面（也就是什么都不加）手动核对这几个路径。
-
-实测四个真实模组：
-
-| 模组 | 被剥条目 | 其中内容与官方不同 |
+| 情况 | 例子 | 处理 |
 |---|---|---|
-| Restoration | 8 | 4（`.uexp` 各差 2~8 字节） |
-| VisceralBlud | 4 | 2（`Blood_Standard` 差 1,640 字节） |
-| VisceralGore | 0 | — |
-| wound | 0 | — |
+| 模组只是**照抄**了官方资产（作者打包时顺手带上的依赖） | 旧蓝图副本 | **剥掉**：零损失，还能解决崩溃 |
+| 模组**改过**这个资产（那就是模组的功能本身） | 血腥 mod 改 `Blood_Standard` 数据表、改 `BP_RoNBloodPool` 让它生成自己的贴花 | **必须保留**：剥掉 = 游戏能进但**什么都不发生** |
 
-早期清单没有 `sizes` 段也能用，只是少了这层提示。
+**怎么区分？** 比对官方条目的两个大小：
+
+```
+未压缩大小 == 模组 且 压缩后大小 == 模组   -> 照抄官方，剥掉零风险
+任一不同                                  -> 内容不一样，当作「模组改过」，不剥
+```
+
+> 为什么两个都要比：实测 `VisceralBlud` 的 `BP_RoNBloodPool` **未压缩大小和官方一模一样**
+> （6,057 B），但**压缩后 2,260 vs 2,198** —— Oodle 对相同输入是确定性的，压缩后不一样
+> 就说明内容真的不同。只看未压缩大小会误判成「照抄」，把它剥掉整个血腥效果就没了。
+
+v1.1.0 起默认**只剥能证明是照抄官方的**，其余一律保留。要连改过的一起剥
+（比如游戏一进就崩、必须清掉旧蓝图），加 `--strip-modified`
+（界面勾「**连改过的也剥**」）—— 但开了之后模组很可能变成
+「能进游戏但什么都不发生」，这**正是**之前用户反馈的那个症状。
+
+清单里没有 `sizes`/`csizes` 段时判断不了，程序会**保守地一个都不剥**并提示重新生成
+（生成只要几秒）。
+
+实测四个真实模组（v1.1.0 默认）：
+
+| 模组 | 条目 | 之前会剥 | v1.1.0 默认 | 原因 |
+|---|---|---|---|---|
+| Restoration | 39 | 8 | **0** | 4 个蓝图内容被模组改过 |
+| VisceralBlud | 1125 | 4 | **0** | `Blood_Standard` + `BP_RoNBloodPool` 都被改过 |
+| VisceralGore | 523 | 0 | **0** | 本来就无可剥 |
+| wound | 9 | 0 | **0** | 本来就无可剥 |
+
+也就是说这四个模组**原样输出**（逐字节等于原文件）。
 
 ### 清单生成：现在只要几秒
 
@@ -328,26 +338,47 @@ Since v1.0.1:
 * A manifest containing only bare file names now produces an explicit error
   instead of silently doing nothing
 
-### ★ Same path ≠ same content (warned about since v1.0.2)
+### ★ Same path ≠ same content (since v1.1.0: edited assets are always kept)
 
 An identical path only proves the mod points at the *same asset* — not that the
-content is the same. A mod may deliberately modify a blueprint or data table
-(a gore mod editing `Blood_Standard`, for example).
+content is the same, and the two cases need **opposite** handling:
 
-The manifest therefore also records each official entry's **uncompressed size**,
-and the tool compares it before stripping:
+| Case | Example | Handling |
+|---|---|---|
+| Mod merely **copies** an official asset (a dependency the author packed by accident) | stale blueprint copy | **Strip it** — zero loss, and it fixes the crash |
+| Mod **edited** that asset (that edit *is* the feature) | a gore mod editing `Blood_Standard`, or `BP_RoNBloodPool` to spawn its own decals | **Must keep it** — stripping gives you "loads fine, does nothing" |
+
+**How they are told apart** — both sizes are compared:
 
 ```
-⚠ 2 stripped entries differ in content from the official version
-  (the mod may have edited them; stripped anyway):
-     ReadyOrNot/Data/Blood_Standard.uasset   mod 11,663B / official 10,023B
+uncompressed size matches AND compressed size matches  -> verbatim copy, safe to strip
+either one differs                                     -> treat as "mod edited it", keep
 ```
 
-- **Same size** → almost certainly a verbatim copy of the official asset, safe to strip
-- **Different size** → the mod edited it, so stripping loses those edits
+> Why both: `VisceralBlud`'s `BP_RoNBloodPool` has an **identical uncompressed size**
+> (6,057 B) but a **different compressed size** (2,260 vs 2,198). Oodle is
+> deterministic for identical input, so a different compressed size means the
+> content really differs. Comparing only uncompressed size would misclassify it
+> as a copy — and stripping it kills the whole blood effect.
 
-★ This is a **warning only** — it does not change what gets stripped.
-Manifests generated before v1.0.2 lack the `sizes` section and simply skip this check.
+Since v1.1.0 only provable verbatim copies are stripped. To also strip edited
+assets (needed when the game crashes on load), pass `--strip-modified`
+(GUI: "连改过的也剥") — be aware that this is what produces the
+"game loads but nothing happens" reports.
+
+When the manifest has no `sizes`/`csizes`, nothing can be proven, so the tool
+**conservatively strips nothing** and asks you to regenerate the manifest (seconds).
+
+Measured on four real mods (v1.1.0 defaults):
+
+| Mod | Entries | Previously stripped | v1.1.0 default | Why |
+|---|---|---|---|---|
+| Restoration | 39 | 8 | **0** | 4 blueprints were edited by the mod |
+| VisceralBlud | 1125 | 4 | **0** | both `Blood_Standard` and `BP_RoNBloodPool` were edited |
+| VisceralGore | 523 | 0 | **0** | nothing to strip |
+| wound | 9 | 0 | **0** | nothing to strip |
+
+All four are now emitted **byte-identical to the source pak**.
 
 ### Manifest generation is now fast
 

@@ -98,9 +98,20 @@ def main():
     for rel in doubled:
         if rel.endswith(".uasset") and "Textures/" in rel:
             check(rel not in d2._drop, f"贴图类保留: {rel}")
+    # 这份「官方」内容全是另写的，和模组不一样 -> 判定成「模组改过」-> 保留。
+    # 也就说这里验证的是 full 匹配确实命中了（见上面的 matched_full），
+    # 真正剥不剥由下面的第 4 节决定。
+    check(all(rel not in d2._drop for rel in doubled),
+          "内容被改过 -> 默认一条都不剥")
+
+    print("   只看「路径命中」的话，蓝图/数据类确实被认成官方已有：")
     for rel in FX.CONFLICT_ASSETS:
-        check(("ReadyOrNot/Content/" + rel) in d2._drop,
-              f"蓝图/数据类剥离: {rel}")
+        e = next(x for x in d2._elist if x.rel == "ReadyOrNot/Content/" + rel)
+        if not rel.endswith(".uasset"):
+            # .uexp 不算「冲突型」（它没有包结构），靠整组规则跟着走
+            continue
+        check(e.official_by == "full" and e.conflict,
+              f"{rel.rsplit('/',1)[-1]}: full 命中 + 冲突型")
 
     # ------------------------------------------------------------------
     print("\n3) --match-name 激进模式：同名的边界")
@@ -130,17 +141,28 @@ def main():
         check(rel not in d5._drop, f"贴图仍然保留: {rel}")
 
     # ------------------------------------------------------------------
-    print("\n4) 「内容和官方不一样」的提示（只警告，不改变剥离）")
-    print("   官方那份和模组不同 → 应该提示，但剥离结果不变")
-    check(len(d2.size_mismatch) == len(FX.CONFLICT_ASSETS),
-          f"4 个被剥的蓝图/数据都被标出内容不同（{len(d2.size_mismatch)}）")
-    for rel, msz, osz in d2.size_mismatch:
-        check(msz != osz, f"{rel.rsplit('/',1)[-1]}: 模组 {msz}B != 官方 {osz}B")
-    check(any("内容和官方不一样" in a for a in d2.actions),
-          "结论里给出了这条提示")
-    check(d2.dropped == 4, f"剥离行为没变（仍然剥 4 条，实际 {d2.dropped}）")
+    print("\n4) 「模组自己改过的资产」必须保留（装了跟没装一样的根因）")
+    print("   官方那份和模组内容不同 -> 判定为模组的功能 -> 不剥")
+    check(len(d2.kept_modified) == 2,
+          f"2 个资产被认成「模组改过」（实际 {len(d2.kept_modified)}）")
+    check(d2.dropped == 0, f"一条都不剥（实际 {d2.dropped}）")
+    check(d2.kept == len(doubled), f"全部保留（{d2.kept}/{len(doubled)}）")
+    check(d2.verdict == "本来就可用", f"结论：{d2.verdict}")
+    check(any("内容被模组改过" in a or "模组改过" in a for a in d2.actions),
+          "结论里说明保留了改过的资产")
+    out2 = os.path.join(WORK, "mod_out")
+    RC.convert(d2, out2, verify=False)
+    got2 = set(P.read_pak(d2.out_path).all_paths())
+    check(got2 == set(doubled), f"写出内容一字不少（{len(got2)} 条）")
 
-    print("   官方那份和模组逐字节一样 → 不该有任何提示")
+    print("   显式开 strip_modified -> 才连改过的一起剥（给「一进就崩」用）")
+    d2b = RC.diagnose(mod2, off, strip_modified=True, verbose=False)
+    check(d2b.dropped == len(FX.CONFLICT_ASSETS),
+          f"剥 4 条（实际 {d2b.dropped}）")
+    check(len(d2b.size_mismatch) == len(FX.CONFLICT_ASSETS),
+          f"并记录下这些被剥条目的内容差异（{len(d2b.size_mismatch)}）")
+
+    print("   官方那份和模组逐字节一样 -> 照抄官方 -> 照剥")
     paks2 = os.path.join(WORK, "gamepaks_same")
     os.makedirs(paks2, exist_ok=True)
     FX.make_official_pak_like_real(os.path.join(paks2, "pakchunk1-Windows.pak"),
@@ -149,24 +171,25 @@ def main():
     RC.build_manifest_from_game_paks(paks2, man2, verbose=False)
     off2 = RC.OfficialAssets(man2)
     check(bool(off2.sizes), f"清单带上了大小信息（{len(off2.sizes)} 条）")
-    # 模组内容和「官方」那份逐字节一样（都和 default_files() 相同）
     mod_same = FX.make_pak(os.path.join(WORK, "Identical_P.pak"),
                            {"ReadyOrNot/Content/" + rel: blob
                             for rel, blob in FX.default_files().items()})
     d6 = RC.diagnose(mod_same, off2, verbose=False)
     check(d6.dropped == len(FX.CONFLICT_ASSETS),
           f"照旧剥离（{d6.dropped} 条）")
-    check(d6.size_mismatch == [],
-          f"内容一致 -> 无提示（实际 {d6.size_mismatch}）")
+    check(d6.kept_modified == [], f"没有需要保留的（{d6.kept_modified}）")
+    check(d6.size_mismatch == [], f"也没有内容差异提示（{d6.size_mismatch}）")
 
-    print("   老清单没有 sizes 段 -> 不报错、只是没有这层提示")
+    print("   老清单没有 sizes 段 -> 判断不了「是不是照抄」-> 保守全部保留 + 提示重生成")
     old_man = FX.write_manifest(os.path.join(WORK, "oldschool.json"),
                                 FX.official_paths())
     off3 = RC.OfficialAssets(old_man)
     check(off3.sizes == {}, "没有大小信息")
     d7 = RC.diagnose(mod2, off3, verbose=False)
-    check(d7.size_mismatch == [] and d7.dropped == len(FX.CONFLICT_ASSETS),
-          "老清单下照常剥离、不误报")
+    check(d7.dropped == 0, f"不敢剥（实际 {d7.dropped}）")
+    check(d7.n_size_evidence > 0, f"记录了 {d7.n_size_evidence} 个「缺证据」的资产")
+    check(any("重新生成清单" in p for p in d7.problems),
+          "提示用户重新生成清单")
 
     print(f"\n=== 安全底线测试 {'PASS' if not fails else 'FAIL ' + str(fails)} ===")
     return 0 if not fails else 1

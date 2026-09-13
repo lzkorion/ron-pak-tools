@@ -76,10 +76,19 @@ def default_files() -> dict[str, bytes]:
     return out
 
 
-def write_manifest(path: str, names, generated_at: float | None = None) -> str:
-    """写一份供测试用的官方资产清单（内容全是假名字）。"""
-    data = {"count": len(names), "names": sorted(names),
+def write_manifest(path: str, names, generated_at: float | None = None,
+                   sizes: dict | None = None) -> str:
+    """写一份供测试用的官方资产清单（内容全是假名字）。
+
+    sizes: {全路径: (未压缩大小, 压缩后大小)}。没有大小信息时，
+           「照抄官方」和「模组改过」分不出来，默认策略会一条都不剥。
+    """
+    ordered = sorted(names)
+    data = {"count": len(ordered), "names": ordered,
             "generated_by": "tests/fixtures.py (synthetic)"}
+    if sizes:
+        data["sizes"] = [int(sizes.get(n, (-1, -1))[0]) for n in ordered]
+        data["csizes"] = [int(sizes.get(n, (-1, -1))[1]) for n in ordered]
     if generated_at is not None:
         data["generated_at"] = generated_at
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -97,10 +106,51 @@ def official_names() -> list[str]:
     return [os.path.basename(x) for x in CONFLICT_ASSETS + KEEP_ASSETS]
 
 
+def official_manifest_entries(mount: str = MOUNT):
+    """官方「已有」的那批：(全路径列表, {全路径: (未压缩大小, 压缩后大小)})。
+
+    内容与 default_files() 里对应条目【逐字节一样】—— 也就是「照抄官方」的情形，
+    默认策略下应该被判为可剥。合成 pak 是不压缩存的，所以两个大小相等。
+    """
+    blobs = default_files()
+    names, sizes = [], {}
+    for rel in CONFLICT_ASSETS + KEEP_ASSETS:
+        p = RC.OfficialAssets.full_path_of(mount, rel)
+        n = len(blobs[rel])
+        names.append(p)
+        sizes[p] = (n, n)
+    return names, sizes
+
+
 def official_paths(mount: str = MOUNT) -> list[str]:
     """官方「已有」的假资产全路径 —— 与模组挂载点拼出来一致，所以是 full 命中。"""
-    return [RC.OfficialAssets.full_path_of(mount, rel)
-            for rel in CONFLICT_ASSETS + KEEP_ASSETS]
+    return official_manifest_entries(mount)[0]
+
+
+def paths_and_sizes(files: dict, mount: str = MOUNT):
+    """把一份 {相对路径: 内容} 变成 (全路径列表, 大小表)。
+
+    测试里拿它当「官方清单」，表示官方那份和模组给的这份一模一样。
+    """
+    names, sizes = [], {}
+    for rel, blob in files.items():
+        p = RC.OfficialAssets.full_path_of(mount, rel)
+        n = len(blob)
+        names.append(p)
+        sizes[p] = (n, n)
+    return names, sizes
+
+
+def make_stub_official(names, sizes=None):
+    """造一个桩 OfficialAssets（可带大小信息）。"""
+    class Stub(RC.OfficialAssets):
+        def __init__(self):
+            super().__init__(None)
+            self.add_paths(names)
+            for k, v in (sizes or {}).items():
+                self.sizes[self._normalize(k)] = v
+            self.source = "(合成桩)"
+    return Stub()
 
 
 def make_official_pak(path: str) -> str:

@@ -39,9 +39,11 @@ def main():
         f.write(b"not a pak file" * 50)
 
     # 合成「官方清单」放到程序旁边（GUI 会自动找到）
-    # ★ 必须是【全路径】：裸文件名在默认策略下一条都匹配不上（同名 ≠ 同路径）
+    # ★ 必须是【全路径】+【带大小】：裸文件名匹配不上，没有大小就分不出
+    #   「照抄官方」和「模组自己改过」，默认策略下一条都不剥。
     man = G.manifest_path()
-    FX.write_manifest(man, FX.official_paths())
+    _names, _sizes = FX.official_manifest_entries()
+    FX.write_manifest(man, _names, sizes=_sizes)
 
     # 配置会影响初始状态（比如记住上次目录会让按钮变可用）：
     # 测试期间先移走，结束时恢复，避免与其它测试互相干扰

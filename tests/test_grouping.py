@@ -52,16 +52,13 @@ def main():
 
     # 官方清单：冲突型 + 贴图型都算「官方已有」——必须是【全路径】，
     # 否则默认策略（只信路径一致）一条都不会剥。
-    official = [RC.OfficialAssets.full_path_of(FX.MOUNT, f"{stem}.uasset"),
-                RC.OfficialAssets.full_path_of(FX.MOUNT, f"{keep_stem}.uasset")]
+    # 大小也要给：模组这份就是【照抄官方】，所以该剥。
+    official, sizes = FX.paths_and_sizes({
+        f"{stem}.uasset": files[f"{stem}.uasset"],
+        f"{keep_stem}.uasset": files[f"{keep_stem}.uasset"],
+    })
 
-    class Stub(RC.OfficialAssets):
-        def __init__(self):
-            super().__init__(None)
-            self.add_paths(official)
-            self.source = "(合成桩)"
-
-    d = RC.diagnose(pak, Stub(), verbose=False)
+    d = RC.diagnose(pak, FX.make_stub_official(official, sizes), verbose=False)
     print(f"  条目 {d.total_entries}  剥离 {d.dropped}  保留 {d.kept}")
     print(f"  被剥: {sorted(d._drop)}")
 

@@ -206,7 +206,7 @@ def save_config(cfg: dict) -> None:
 # ---------------------------------------------------------------------------
 def _worker(mod_dir: str, outdir: str, manifest: str | None,
             verify: bool, strip_all: bool, match_name: bool,
-            game_paks: str | None, q) -> None:
+            strip_modified: bool, game_paks: str | None, q) -> None:
     """在子进程中执行转换，通过 q 回传消息。
 
     消息格式: (kind, payload)
@@ -233,9 +233,11 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
         log(f"模组目录 : {mod_dir}")
         log(f"输出目录 : {outdir}")
         match_name = bool(match_name)
+        strip_modified = bool(strip_modified)
         log(f"官方校验 : {'开启' if verify else '关闭'}")
         log(f"剥离模式 : {'激进（官方已有即剥离）' if strip_all else '智能（只剥冲突型）'}")
         log(f"同名判定 : {'开启（文件名相同也算官方已有，有误剥风险）' if match_name else '关闭（只信路径完全一致）'}")
+        log(f"改过的资产: {'剥掉（可能变成能进游戏但什么都不发生）' if strip_modified else '保留（推荐：那是模组的功能本身）'}")
         log("=" * 70)
 
         # ---- 官方清单（由本机游戏生成，不随程序分发）----
@@ -310,7 +312,8 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
             q.put(("prog", (i - 1, total, _os.path.basename(src))))
             try:
                 d = RC.diagnose(src, official, strip_all=strip_all,
-                                match_name=match_name, log=log)
+                                match_name=match_name,
+                                strip_modified=strip_modified, log=log)
                 if d.ok:
                     RC.convert(d, outdir, verify=verify, log=log)
             except Exception as ex:
@@ -472,14 +475,22 @@ class App:
                  "开了有把模组贴图误剥的风险）"
         ).grid(row=2, column=0, sticky="w")
 
+        self.strip_modified_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opt, variable=self.strip_modified_var,
+            text="连改过的也剥：把模组自己改过的蓝图/数据表也删掉"
+                 "（默认关闭；开了多半会变成「能进游戏但什么都不发生」，"
+                 "只在游戏一进就崩时才勾）"
+        ).grid(row=3, column=0, sticky="w")
+
         self.genman_var = tk.BooleanVar(value=False)
         chk = ttk.Checkbutton(
             opt, variable=self.genman_var,
             text="先生成官方资产清单（首次使用必做；游戏更新后重新生成）")
-        chk.grid(row=3, column=0, sticky="w")
+        chk.grid(row=4, column=0, sticky="w")
         self.game_var = tk.StringVar(value="游戏目录识别中…")
         ttk.Label(opt, textvariable=self.game_var,
-                  foreground="#666").grid(row=4, column=0, sticky="w", pady=(4, 0))
+                  foreground="#666").grid(row=5, column=0, sticky="w", pady=(4, 0))
 
         # ---- 按钮 ----
         bar = ttk.Frame(root, padding=(14, 6))
@@ -552,6 +563,8 @@ class App:
             self.strip_all_var.set(bool(self.cfg["strip_all"]))
         if "match_name" in self.cfg:
             self.match_name_var.set(bool(self.cfg["match_name"]))
+        if "strip_modified" in self.cfg:
+            self.strip_modified_var.set(bool(self.cfg["strip_modified"]))
         if autostart and last and os.path.isdir(last):
             self.root.after(400, self.start)
 
@@ -706,7 +719,8 @@ class App:
         # 记住本次选择
         self.cfg.update({"last_dir": d, "verify": bool(self.verify_var.get()),
                          "strip_all": bool(self.strip_all_var.get()),
-                         "match_name": bool(self.match_name_var.get())})
+                         "match_name": bool(self.match_name_var.get()),
+                         "strip_modified": bool(self.strip_modified_var.get())})
         save_config(self.cfg)
 
         self.running = True
@@ -726,7 +740,8 @@ class App:
                 target=_worker,
                 args=(d, self.outdir, manifest, bool(self.verify_var.get()),
                       bool(self.strip_all_var.get()),
-                      bool(self.match_name_var.get()), game_paks, self.q),
+                      bool(self.match_name_var.get()),
+                      bool(self.strip_modified_var.get()), game_paks, self.q),
                 daemon=True)
             self.proc.start()
         except Exception as ex:
@@ -946,7 +961,8 @@ def _selftest(moddir: str, verify: bool = False) -> int:
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     proc = ctx.Process(target=_worker,
-                       args=(moddir, outdir, man, verify, False, False, None, q),
+                       args=(moddir, outdir, man, verify, False, False, False,
+                             None, q),
                        daemon=True)
     proc.start()
 

@@ -259,11 +259,17 @@ class OfficialAssets:
                 self.bare_ambiguous.add(b)   # 同名出现在多处 → 不敢剥
         # 可选：与 names 一一对应的未压缩大小（老清单没有这一段）
         sizes = data.get("sizes")
+        csizes = data.get("csizes")
         if isinstance(sizes, list) and len(sizes) == len(names):
-            for n, sz in zip(names, sizes):
+            for i, (n, sz) in enumerate(zip(names, sizes)):
                 s = self._normalize(n)
-                if s and isinstance(sz, int) and sz >= 0:
-                    self.sizes[s] = sz
+                if not s or not isinstance(sz, int) or sz < 0:
+                    continue
+                cs = -1
+                if isinstance(csizes, list) and i < len(csizes) \
+                        and isinstance(csizes[i], int):
+                    cs = csizes[i]
+                self.sizes[s] = (sz, cs)
         self.source = (f"{path}（{len(names)} 条，全路径 {len(self.full)} 条"
                        + (f"，含大小信息" if self.sizes else "") + "）")
 
@@ -287,7 +293,15 @@ class OfficialAssets:
                 self.bare_ambiguous.add(b)
 
     def size_of(self, full_path: str) -> int | None:
-        """官方条目在该路径上的【未压缩原始大小】；清单里没有大小信息则 None。"""
+        """官方条目在该路径上的【未压缩大小】；清单里没有就 None。"""
+        v = self.sizes.get(self._normalize(full_path))
+        return v[0] if v else None
+
+    def entry_size(self, full_path: str) -> tuple[int, int] | None:
+        """官方条目在该路径上的 (未压缩大小, 压缩后大小)；清单里没有就 None。
+
+        压缩后大小可能是 -1（老清单没有这一项）—— 那就没法证明「照抄」。
+        """
         return self.sizes.get(self._normalize(full_path))
 
     def has(self, full_path: str) -> tuple[bool, str]:
@@ -371,12 +385,12 @@ def build_manifest_from_game_paks(paks_dir: str, out_json: str,
         try:
             pk = P.read_pak_index(path)
             mount = pk.mount_point
-            pairs = [(OfficialAssets.full_path_of(mount, rel), unc)
-                     for rel, unc in pk.all_paths_with_sizes()]
-            official.add_paths(p for p, _ in pairs)
-            for p, unc in pairs:
+            pairs = [(OfficialAssets.full_path_of(mount, rel), unc, cmp_)
+                     for rel, unc, cmp_ in pk.all_paths_with_sizes()]
+            official.add_paths(p for p, _u, _c in pairs)
+            for p, unc, cmp_ in pairs:
                 if unc >= 0:
-                    official.sizes[p] = unc
+                    official.sizes[p] = (unc, cmp_)
             del pk
             if verbose:
                 _emit_default(verbose, f" 累计 {len(official)}")
@@ -408,9 +422,8 @@ def write_manifest(path: str, names, extra: dict | None = None,
                    sizes: dict | None = None) -> None:
     """写清单 JSON，并记下生成时间（用于判断清单是否过期）。
 
-    sizes: 可选的 {全路径: 未压缩原始大小}。有它才能在被剥资产
-           「内容和官方不一样」时提醒用户（见 diagnose 的 size_mismatch）——
-           没有也不影响判定，只是少了这层提示。
+    sizes: 可选的 {全路径: (未压缩大小, 压缩后大小)}。有它才能分辨
+           「照抄官方」和「模组自己改过」—— 没有的话为了安全一条都不会剥。
     """
     ordered = sorted(set(names))
     data = {
@@ -420,9 +433,13 @@ def write_manifest(path: str, names, extra: dict | None = None,
         "names": ordered,
     }
     if sizes:
-        # 与 names 一一对应的数组：比 {路径: 大小} 的 JSON 小得多
-        # （47 万条时约 4 MB vs 15 MB），加载也快。
-        data["sizes"] = [int(sizes.get(n, -1)) for n in ordered]
+        # 与 names 一一对应的两个数组：比 {路径: 大小} 的 JSON 小得多
+        # （47 万条时各约 4 MB vs 15 MB），加载也快。
+        #   sizes  = 未压缩大小
+        #   csizes = 压缩后大小（交叉验证用；Oodle 对相同输入是确定性的，
+        #            两个都相同才敢断定是「照抄官方」）
+        data["sizes"] = [int(sizes.get(n, (-1, -1))[0]) for n in ordered]
+        data["csizes"] = [int(sizes.get(n, (-1, -1))[1]) for n in ordered]
     if extra:
         data.update(extra)
     with open(path, "w", encoding="utf-8") as f:
@@ -631,6 +648,12 @@ class Diagnosis:
     matched_bare: int = 0         # 仅文件名相同（存疑，默认不剥）
     size_mismatch: list = field(default_factory=list)
     # ↑ [(rel, 模组大小, 官方大小), ...]：会被剥、但内容和官方【不一样】
+    #   （只在 --strip-modified 模式下才会有内容）
+    kept_modified: list = field(default_factory=list)
+    # ↑ [(资产名, rel, 模组大小, 官方大小), ...]：
+    #   官方已有但【模组改过】→ 判定为模组功能，已保留没剥
+    n_size_evidence: int = 0
+    # ↑ 因为「清单里没有大小信息」而无法判断、只好保守保留的资产数
     # 内部工作数据（不参与序列化）
     _elist: list = field(default_factory=list, repr=False)
     _drop: set = field(default_factory=set, repr=False)
@@ -688,8 +711,8 @@ def read_mod(path: str) -> tuple[P.PakFile, dict[str, P.PakEntry]]:
 
 
 def diagnose(src: str, official: OfficialAssets, *, strip_all: bool = False,
-             match_name: bool = False, verbose: bool = True,
-             log=None) -> Diagnosis:
+             match_name: bool = False, strip_modified: bool = False,
+             verbose: bool = True, log=None) -> Diagnosis:
     """诊断一个模组。
 
     match_name=False（默认，安全）：
@@ -697,8 +720,13 @@ def diagnose(src: str, official: OfficialAssets, *, strip_all: bool = False,
         真实模组常把路径写成 mount + 'ReadyOrNot/Content/...'（多一层），
         按文件名判定会把模组自己的贴图/网格当成官方内容剥掉 → 模组失效。
 
-    match_name=True（激进，需显式开启）：
-        文件名相同也剥，但要求额外证据（同名不歧义，或条数与官方一致）。
+    strip_modified=False（默认，安全）：
+        路径一致、但内容被模组改过的（未压缩大小和官方不同）【不剥】。
+        这类资产就是模组的功能本身 —— 剥掉的话游戏能进，但什么都不发生。
+        只有在「游戏一进就崩」时才考虑开 True 连它们一起剥。
+
+    strip_all=True（激进）：
+        官方已有的一律剥，不看冲突类型。
     """
     emit = log or (print if verbose else (lambda *_a, **_k: None))
     d = Diagnosis(src=src)
@@ -780,12 +808,75 @@ def diagnose(src: str, official: OfficialAssets, *, strip_all: bool = False,
         elif e.conflict and ext in PACKAGE_EXTS:
             drop.add(e.rel)
 
-    # 整组剥离：某个资产只要有成员被剥，它的全部成员一起剥
-    for stem, members in groups.items():
-        if any(m.rel in drop for m in members):
+    # ---- 整组决策：内容被模组改过的，【不剥】------------------------------
+    # ★ 这是「装了跟没装一样」的根因。
+    #
+    #   「官方已有 + 冲突型」有两种完全不同的情况，只看路径分不出来：
+    #
+    #     a) 模组只是【照抄】了官方资产（作者打包时顺手带上的依赖）
+    #        -> 剥掉毫无损失，而且能解决旧蓝图导致的崩溃
+    #     b) 模组【改过】这个资产（比如血腥 mod 改 Blood_Standard 数据表、
+    #        改 BP_RoNBloodPool 让它生成自己的贴花）
+    #        -> 剥掉 = 把模组的功能删了。游戏能进，但什么都不发生
+    #
+    #   区分办法：比对 (未压缩大小, 压缩后大小)。
+    #     · 两个都相同 -> 几乎一定是照抄官方（Oodle 对相同输入是确定性的）
+    #     · 任一不同   -> 内容不一样 -> 当作「模组改过」-> 【不剥】
+    #   实测 BP_RoNBloodPool 未压缩大小和官方一样，但压缩后 2,260 vs 2,198；
+    #   只看未压缩大小会误判成「照抄」，把它剥掉 VisceralBlud 就废了。
+    #
+    #   拿不到大小信息（老清单）时不敢赌，同样不剥，并提示重新生成清单。
+    #   真要连改过的一起剥（比如游戏一进就崩），加 --strip-modified。
+    def asset_modified(members) -> bool:
+        """能不能确认「模组改过这个资产」？确认得了才返回 True。
+
+        只有「路径一致 + 官方大小」才够格下结论：
+          · 大小对不上        -> 内容确实不同 -> True（模组改过）
+          · 大小完全一致      -> 照抄官方     -> False
+          · 清单没带大小信息  -> 不敢赌       -> True（保守：保留）
+        一个 full 命中都没有（比如 --match-name 的同名命中）-> 无从判断 ->
+        False，交给 evidence_ok 那套规则去管。
+        """
+        for m in members:
+            if m.official_by != "full":
+                continue
+            sz = official.entry_size(m.full)
+            if sz is None or sz[1] < 0:
+                return True                  # 清单缺大小 -> 保守
+            if (m.path.uncompressed_size, m.path.size) != sz:
+                return True                  # 内容不一样
+        return False
+
+    d.kept_modified = []
+    d.n_size_evidence = 0
+    for stem, members in sorted(groups.items()):
+        if not any(m.rel in drop for m in members):
+            continue
+        if not strip_modified and asset_modified(members):
+            # 模组自己改过的 -> 整组保留，一条都不剥
             for m in members:
-                if m.rel.lower().endswith(ASSET_EXT_CHAIN):
-                    drop.add(m.rel)
+                drop.discard(m.rel)
+            if not official.sizes and any(m.official_by == "full"
+                                          for m in members):
+                d.n_size_evidence += 1
+            worst = None
+            for m in members:
+                if m.official_by != "full":
+                    continue
+                sz = official.entry_size(m.full)
+                if sz is None or \
+                        (m.path.uncompressed_size, m.path.size) == sz:
+                    continue
+                if worst is None or abs(m.path.uncompressed_size - sz[0]) > \
+                        abs(worst[1] - worst[2]):
+                    worst = (m.rel, m.path.uncompressed_size, sz[0])
+            if worst:
+                d.kept_modified.append((stem,) + worst)
+            continue
+        # 整组剥离：某个资产只要有成员被剥，它的全部成员一起剥
+        for m in members:
+            if m.rel.lower().endswith(ASSET_EXT_CHAIN):
+                drop.add(m.rel)
 
     d.conflict_entries = sum(1 for e in elist if e.conflict)
     d.official_entries = sum(1 for e in elist if e.official)
@@ -793,22 +884,17 @@ def diagnose(src: str, official: OfficialAssets, *, strip_all: bool = False,
     d.dropped = len(drop)
     d.kept = d.total_entries - d.dropped
 
-    # ---- 内容一致性提示 ----------------------------------------------------
-    # 路径一致只说明「指向同一个资产」，不代表「内容一样」。
-    # 比一比未压缩原始大小：一致基本就是照抄官方（剥掉无损失）；
-    # 不一致说明模组可能**故意改过**这个资产，剥掉会丢掉那些改动 ——
-    # 这时只提醒，不改变剥离行为（默认策略仍然照剥，用户自己决定）。
+    # 没被剥、但内容确实和官方不一样的（正常情况下就是上面保下来的那些）
     d.size_mismatch = []
     for rel in sorted(drop):
         e = by_rel.get(rel)
         if e is None or e.official_by != "full":
             continue
         osz = official.size_of(e.full)
-        if osz is None:                 # 清单没带大小信息，跳过
+        if osz is None:
             continue
-        msz = e.path.uncompressed_size
-        if msz != osz:
-            d.size_mismatch.append((rel, msz, osz))
+        if e.path.uncompressed_size != osz:
+            d.size_mismatch.append((rel, e.path.uncompressed_size, osz))
 
     emit(f"   版本 {d.version}   挂载点 {d.mount!r}   方法 {d.methods}")
     emit(f"   条目 {d.total_entries}（恢复路径 {d.recovered}）")
@@ -816,18 +902,35 @@ def diagnose(src: str, official: OfficialAssets, *, strip_all: bool = False,
          f"  仅同名 {d.matched_bare} 条（存疑，默认不剥）")
     for p in d.problems:
         emit(f"   ⚠ {p}")
+    if d.n_size_evidence:
+        d.problems.append(
+            f"官方清单里没有大小信息，{d.n_size_evidence} 个资产无法确认"
+            f"是不是「照抄官方」—— 已按【模组改过】处理，全部保留。"
+            f"请重新生成清单（界面勾「先生成官方资产清单」，几秒）")
+        emit(f"   ⚠ {d.problems[-1]}")
+    if d.kept_modified:
+        emit(f"   ⚠ {len(d.kept_modified)} 个资产官方已有，但【内容被模组改过】"
+             f"—— 这是模组的功能本身，已【保留】（没剥）：")
+        for _stem, rel, msz, osz in d.kept_modified[:5]:
+            emit(f"        {rel}   模组 {msz:,}B / 官方 {osz:,}B")
+        if len(d.kept_modified) > 5:
+            emit(f"        ... 其余 {len(d.kept_modified)-5} 个")
+        emit("        （想连这些一起剥：命令行加 --strip-modified，"
+             "界面勾「连改过的也剥」）")
     if d.size_mismatch:
-        emit(f"   ⚠ 其中 {len(d.size_mismatch)} 个被剥条目的内容和官方【不一样】"
-             f"（可能是模组故意改的，剥掉会丢掉这些改动；仍然照剥）：")
+        emit(f"   ⚠ 另有 {len(d.size_mismatch)} 个被剥条目内容和官方不同"
+             f"（--strip-modified 模式）：")
         for rel, msz, osz in d.size_mismatch[:5]:
             emit(f"        {rel}   模组 {msz:,}B / 官方 {osz:,}B")
-        if len(d.size_mismatch) > 5:
-            emit(f"        ... 其余 {len(d.size_mismatch)-5} 个")
 
     if d.dropped == 0:
         d.actions.append("无可剥离内容（内容都该保留）")
     else:
         d.actions.append(f"剥离 {d.dropped} 个冲突条目，保留 {d.kept} 个")
+    if d.kept_modified:
+        d.actions.append(
+            f"保留了 {len(d.kept_modified)} 个「官方已有但模组改过」的资产"
+            f"（那是模组的功能，剥了就会'能进游戏但什么都不发生'）")
     if d.size_mismatch:
         d.actions.append(
             f"提示：{len(d.size_mismatch)} 个被剥条目的内容和官方不一样"
@@ -995,6 +1098,10 @@ def main() -> int:
     ap.add_argument("--match-name", action="store_true",
                     help="激进模式：文件名相同也算「官方已有」（默认关闭，"
                          "因为同名不等于同路径，会把模组自己的贴图剥掉）")
+    ap.add_argument("--strip-modified", action="store_true",
+                    help="连「模组自己改过」的资产也剥掉（默认保留）。"
+                         "只在游戏一进就崩、需要清掉旧蓝图时才用 —— "
+                         "开了之后模组很可能变成'能进游戏但什么都不发生'")
     ap.add_argument("--target-version", type=int, default=None,
                     help=f"输出 pak 版本（默认跟随源；当前游戏为 {PAK_VERSION_LATEST}）")
     ap.add_argument("--verify", action="store_true",
@@ -1040,7 +1147,8 @@ def main() -> int:
     for i, src in enumerate(paks, 1):
         print(f"\n[{i}/{len(paks)}]", end=" ")
         d = diagnose(src, official, strip_all=args.strip_all,
-                     match_name=args.match_name)
+                     match_name=args.match_name,
+                     strip_modified=args.strip_modified)
         if not args.dry_run and d.ok:
             convert(d, outdir, verify=args.verify,
                     target_version=args.target_version)
@@ -1102,6 +1210,9 @@ def main() -> int:
                 "matched_full": d.matched_full, "matched_bare": d.matched_bare,
                 "size_mismatch": [{"path": r, "mod_bytes": m, "official_bytes": o}
                                   for r, m, o in d.size_mismatch],
+                "kept_modified": [{"asset": s, "path": r, "mod_bytes": m,
+                                   "official_bytes": o}
+                                  for s, r, m, o in d.kept_modified],
             } for d in results], f, ensure_ascii=False, indent=2)
         print(f"\n报告已写入 {args.json}")
 

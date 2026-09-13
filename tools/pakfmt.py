@@ -819,16 +819,19 @@ class PakFile:
                 out.append((dname + fname).lstrip("/"))
         return out
 
-    def all_paths_with_sizes(self) -> list[tuple[str, int]]:
-        """[(路径, 未压缩原始大小), ...] —— 全部来自索引，不碰数据区。
+    def all_paths_with_sizes(self) -> list[tuple[str, int, int]]:
+        """[(路径, 未压缩大小, 压缩后大小), ...] —— 全部来自索引，不碰数据区。
 
-        ★ 为什么需要大小：路径一致不代表内容一致。模组可能「故意」改过某个
-          蓝图/数据表（比如血腥 mod 改 Blood_Standard），这时把它的原始大小和
-          官方比一比就能看出来，从而在剥离前提醒用户 —— 大小相同基本就是
-          照抄官方，剥掉不会有任何损失。
+        ★ 为什么需要这两个大小：路径一致不代表内容一致。模组可能「故意」改过
+          某个蓝图/数据表（比如血腥 mod 改 Blood_Standard），这时把它的两个大小
+          和官方比一比就能看出来：
+            · 两个都相同  -> 几乎一定是照抄官方（压缩器对相同输入是确定性的），
+                             剥掉零风险
+            · 任一不同    -> 内容不一样，保守当作「模组改过」，别剥
+          实测：BP_RoNBloodPool 未压缩大小和官方一样（6,057），但压缩后
+          2,260 vs 2,198 —— 只看未压缩大小会误判成「照抄」。
 
-        拿不到条目的记 -1（例如 -1 位置越界），调用方自行忽略。
-        大小是【未压缩】的（FPakEntry.UncompressedSize），和压缩方式无关。
+        拿不到条目的记 -1。大小是 FPakEntry 里的原始值。
         """
         idx = self.read_directory_index("fdi")
         if not idx:
@@ -845,7 +848,8 @@ class PakFile:
             for fname, loc in files.items():
                 e = loc2entry.get(loc)
                 out.append(((dname + fname).lstrip("/"),
-                            e.uncompressed_size if e is not None else -1))
+                            e.uncompressed_size if e is not None else -1,
+                            e.size if e is not None else -1))
         return out
 
     def entry_physical_offset(self, e: PakEntry) -> int:
