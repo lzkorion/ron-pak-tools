@@ -64,19 +64,27 @@ Get-FileHash .\RoNPakTools.exe -Algorithm SHA256
 #### 方式一：图形界面（推荐）
 
 1. 双击 `RoNPakTools.exe`
-2. 首次使用点「**先生成官方资产清单**」（用你自己装的游戏，在本机生成，需几分钟）
+2. 首次使用点「**先生成官方资产清单**」（用你自己装的游戏，在本机生成，几秒即可）
 3. 选模组文件夹 → 点「开始转换」
 4. 结果在 `<模组文件夹>\converted\`，**原文件不会被修改**
 
 #### 方式二：命令行
 
 ```powershell
-# 一键批量转换
+# 从游戏本体 paks 生成全路径清单（几秒），再做转换
+python tools/ronconvert.py "C:\你的模组文件夹" `
+    --game-paks "E:\SteamLibrary\steamapps\common\Ready Or Not\ReadyOrNot\Content\Paks"
+
+# 一键批量转换（已有清单时）
 python tools/ronconvert.py "C:\你的模组文件夹" --verify
 
 # 先看诊断，不写文件
 python tools/ronconvert.py "C:\你的模组文件夹" --dry-run
 ```
+
+> 清单必须是**全路径**（`readyornot/content/blueprints/...`）。
+> 如果手上的是只有文件名的旧清单，工具会提示你重新生成 ——
+> 因为按文件名剥会把模组自己的贴图剥掉。
 
 ### 转换后的四种结论
 
@@ -84,7 +92,7 @@ python tools/ronconvert.py "C:\你的模组文件夹" --dry-run
 |---|---|---|
 | **已转换（剥离冲突）** | 剥掉了会冲突的蓝图/数据资产 | 用 `converted` 里的文件替换原模组 |
 | **本来就可用** | 没有可剥的冲突资产 | 不用动 |
-| **已被官方完全取代** | 剥离后一条不剩 | **删除该模组** |
+| **已被官方完全取代** | 剥离后一条不剩 | **删除该模组**（不会产出空 pak） |
 | **无法处理** | 不是合法 pak | 人工检查 |
 
 转换完成后会弹窗告知输出目录，日志里给出每个模组的结论和行动建议：
@@ -101,8 +109,54 @@ python tools/ronconvert.py "C:\你的模组文件夹" --dry-run
 | 贴图/模型/音频等资源替换 | 血腥贴图 | **正常 mod → 必须保留** |
 
 所以默认走**保守白名单**：只剥「扩展名是 `.uasset`/`.umap` 且路径像
-蓝图/逻辑/数据表/角色/武器/UI」的官方同名条目。
+蓝图/逻辑/数据表/角色/武器/UI」的官方条目。
 需要激进模式时用 `--strip-all`（**可能把贴图类 mod 改坏，慎用**）。
+
+### ★★ 「同名」不等于「同路径」（v1.0.1 修的关键 bug）
+
+光有白名单还不够，**判定「官方已有」必须要求路径完全一致**。
+
+真实模组的路径长这样：
+
+```
+mount = '../../../ReadyOrNot/Content/'
+rel   = 'ReadyOrNot/Character/Gore/Gore_Cuts/T_Gore_Limb_Amputations_body_BC.uasset'
+```
+
+注意 `rel` 里**又写了一遍 `ReadyOrNot/`**（挂载点里已经有了），所以它和官方
+永远「同路径匹配不上」，但**文件名**和官方某个资产一样。
+
+v1.0.0 用文件名判定「官方已有」→ 把模组自己的贴图/网格当成官方内容剥掉 →
+**模组直接失效**。实测（用户提供的原版/转换后成对数据）：
+
+| 模组 | 条目 | 旧逻辑剥掉 | 其中误杀 | 新逻辑剥掉 |
+|---|---|---|---|---|
+| Restoration | 39 | 33 | **25** 个骨骼网格/贴图 | 8（全是蓝图） |
+| VisceralBlud | 1125 | 155 | **151** 个贴图/贴花/MI | 4 |
+| VisceralGore | 523 | 31 | **31** 个网格/贴图/MI | 0（本来就可用） |
+| wound | 9 | **9（全剥光）** | 9 | 0（本来就可用） |
+
+`wound` 被剥到 0 条，pak 只剩 396 字节 —— 装上去完全没效果。
+
+从 v1.0.1 起：
+
+* 匹配强度分三级：`full`（路径完全一致，**可信**）/ `bare`（只有文件名相同，**存疑**）/ `none`
+* **默认只信 `full`**；`bare` 一律不剥
+* 模组路径里重复的 `ReadyOrNot/`、`Content/` 前缀会自动去掉再比对，让 `full` 能命中
+* 需要按文件名剥时，显式开 `--match-name`（GUI 里的「同名也剥」），
+  且同名出现在多个目录时仍然拒绝剥
+* 清单里如果只有裸文件名，工具会**明确报错**让你重新生成，而不是静默空转
+
+> 这条原则在代码注释、测试（`tests/test_safety.py`）和本文档里都有，
+> 有测试保护，别再改回去。
+
+### 清单生成：现在只要几秒
+
+v1.0.0 生成清单要把每个本体 pak 整份读进内存（`pakchunk0` 有 24 GB），
+既慢又可能爆内存 —— 实测常常直接跳过 `pakchunk0`，导致清单缺了 39 万条路径。
+
+v1.0.1 只读 **pak 尾部 4 KB + 索引区**（`pakfmt.read_pak_index`），
+25 个本体 pak、约 44 GB，**3 秒**扫完，47 万条全路径。
 
 ### 安装
 
@@ -140,11 +194,15 @@ python tests/run_all.py
 ### 工作原理（为什么不会损坏内容）
 
 1. 用自研解析器读出模组的**完整路径表**（pak 里本来就有，不需要猜）
-2. 和**你本机生成的**官方清单比对
-3. 只丢弃判定为冲突的条目
+2. 和**你本机生成的**官方清单比对 —— 只认**路径完全一致**，同名不算
+3. 只丢弃判定为冲突的条目，并且**按资产整组处理**
+   （一个资产 = `.uasset` + `.uexp` + `.ubulk` + `.bak` 变体，漏一个就成孤儿）
 4. **压缩字节原样搬运**（不需要 Oodle 压缩器），重建索引
 
 ⇒ 保留的条目与原包**逐字节相同**，不是重新压缩。
+
+已用四个真实模组端到端复核（官方 `UnrealPak -List` / `-Test` 全部 rc=0，
+孤儿 0、缺件 0、新增 0、挂载点不变）。
 
 ### 项目结构
 
@@ -155,6 +213,7 @@ ron-pak-tools/
 ├── tools/
 │   ├── pakfmt.py         ★ pak v11/v12 读写库（核心）
 │   ├── ronconvert.py     ★ 检测 + 转换逻辑
+│   ├── ronverify.py      对比原版/转换后（孤儿 / 缺件 / 挂载点）
 │   ├── ronstrip.py       精确剥离（--keep / --drop）
 │   ├── roncheck.py       批量体检
 │   ├── ronunreal.py      官方 UnrealPak 封装
@@ -191,6 +250,7 @@ and repacks the mod without the conflicting parts.
 |---|---|
 | **Batch convert** | Point it at a folder; every `.pak` is diagnosed and converted |
 | **Conservative stripping** | Only strips blueprint/logic/data assets that conflict. Texture/model/audio replacements are **always kept** |
+| **Path-exact matching** | "Same file name" is **not** "same asset". Only a full path match counts (see below) |
 | **Repacking** | Own pak v11/v12 writer. Compressed bytes are copied verbatim, so kept entries stay **byte-identical** |
 | **Verification** | Optionally calls your local UnrealPak for `-List` / `-Test` |
 | **GUI** | Double-click the exe — no command line needed |
@@ -203,9 +263,56 @@ and repacks the mod without the conflicting parts.
 On first run it generates an "official asset manifest" from *your own* game
 installation. It stays on your machine and is never uploaded.
 
+### ★★ "Same name" is not "same path" (the bug fixed in v1.0.1)
+
+Requiring a full path match is what makes stripping safe. Real mods look like this:
+
+```
+mount = '../../../ReadyOrNot/Content/'
+rel   = 'ReadyOrNot/Character/Gore/Gore_Cuts/T_Gore_Limb_Amputations_body_BC.uasset'
+```
+
+`rel` repeats `ReadyOrNot/` even though the mount point already contains it, so it
+can never match an official path — yet its **file name** matches an official asset.
+
+v1.0.0 matched on file name, so it stripped the mod's *own* textures and meshes and
+**the mod stopped working**. Measured on real mods (original vs. converted pairs):
+
+| Mod | Entries | Stripped by v1.0.0 | of which wrong | Stripped by v1.0.1 |
+|---|---|---|---|---|
+| Restoration | 39 | 33 | **25** skeletal meshes/textures | 8 (all blueprints) |
+| VisceralBlud | 1125 | 155 | **151** textures/decals/MIs | 4 |
+| VisceralGore | 523 | 31 | **31** meshes/textures/MIs | 0 (already fine) |
+| wound | 9 | **9 (all of it)** | 9 | 0 (already fine) |
+
+`wound` was stripped down to 0 entries — a 396-byte pak that does nothing.
+
+Since v1.0.1:
+
+* Match strength is graded `full` (identical path, **trusted**) / `bare` (name only, **suspect**) / `none`
+* **Only `full` is trusted by default**; `bare` is never stripped
+* Duplicated `ReadyOrNot/` and `Content/` prefixes are stripped before comparing,
+  so `full` can actually hit
+* Name-based stripping requires `--match-name` (GUI: "同名也剥"), and refuses
+  names that occur in more than one directory
+* A manifest containing only bare file names now produces an explicit error
+  instead of silently doing nothing
+
+### Manifest generation is now fast
+
+v1.0.0 read each base-game pak fully into memory (`pakchunk0` is 24 GB), which was
+slow enough that it usually skipped `pakchunk0` — leaving 390k paths missing.
+
+v1.0.1 reads only the **last 4 KB of the pak plus its index region**
+(`pakfmt.read_pak_index`): 25 paks / ~44 GB in **3 seconds**, 466k full paths.
+
 ### Quick start
 
 ```powershell
+# Generate a full-path manifest from the base game, then convert
+python tools/ronconvert.py "C:\your\mod\folder" `
+    --game-paks "E:\SteamLibrary\steamapps\common\Ready Or Not\ReadyOrNot\Content\Paks"
+
 # Batch convert (writes to <folder>\converted, originals untouched)
 python tools/ronconvert.py "C:\your\mod\folder" --verify
 
@@ -214,7 +321,7 @@ python tools/ronconvert.py "C:\your\mod\folder" --dry-run
 ```
 
 GUI: double-click `RoNPakTools.exe`, generate the official asset manifest once
-(created locally from *your* game install), then pick a folder and convert.
+(created locally from *your* game install, takes seconds), then pick a folder and convert.
 
 ### Requirements
 
@@ -235,11 +342,18 @@ All tests build **synthetic paks on the fly** — no game files or real mods nee
 Mod paks already contain a full path table, so nothing has to be guessed:
 
 1. Read the pak's complete path table with the built-in parser
-2. Compare against the official manifest **generated locally from your game**
-3. Drop only the entries classified as conflicting
+2. Compare against the official manifest **generated locally from your game** —
+   only **path-exact** matches count, a shared file name does not
+3. Drop only the entries classified as conflicting, and drop them **per asset**
+   (one asset = `.uasset` + `.uexp` + `.ubulk` + `.bak` variants; missing one
+   leaves an orphan the engine will choke on)
 4. **Copy the compressed bytes verbatim** (no Oodle compressor required) and rebuild the index
 
 ⇒ Kept entries are **byte-identical** to the source pak.
+
+Validated end-to-end on four real mods: official `UnrealPak -List` / `-Test`
+both return rc=0, with 0 orphans, 0 missing companions, 0 added entries and
+unchanged mount points.
 
 ### Legal
 

@@ -205,8 +205,8 @@ def save_config(cfg: dict) -> None:
 # 子进程 worker —— 必须是模块级函数，且不能是 lambda/闭包（spawn 需要可 pickle）
 # ---------------------------------------------------------------------------
 def _worker(mod_dir: str, outdir: str, manifest: str | None,
-            verify: bool, strip_all: bool, game_paks: str | None,
-            q) -> None:
+            verify: bool, strip_all: bool, match_name: bool,
+            game_paks: str | None, q) -> None:
     """在子进程中执行转换，通过 q 回传消息。
 
     消息格式: (kind, payload)
@@ -232,8 +232,10 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
         log(f"{APP_TITLE}  开始")
         log(f"模组目录 : {mod_dir}")
         log(f"输出目录 : {outdir}")
+        match_name = bool(match_name)
         log(f"官方校验 : {'开启' if verify else '关闭'}")
         log(f"剥离模式 : {'激进（官方已有即剥离）' if strip_all else '智能（只剥冲突型）'}")
+        log(f"同名判定 : {'开启（文件名相同也算官方已有，有误剥风险）' if match_name else '关闭（只信路径完全一致）'}")
         log("=" * 70)
 
         # ---- 官方清单（由本机游戏生成，不随程序分发）----
@@ -270,6 +272,17 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                    "请勾选「先生成官方资产清单」后重试（需要游戏已安装）。\n"
                    "清单在本机生成、只存在你自己电脑上，不含任何游戏资产文件。"))
             return
+        if not official.has_full_index and not match_name:
+            # ★ 旧的裸名清单 + 默认策略 = 一条都不会剥（工具空转）。
+            #   必须说清楚，否则用户会以为「转换过了」却什么都没发生。
+            q.put(("fatal",
+                   "这份官方清单里【只有文件名，没有全路径】，而默认策略只信"
+                   "「路径完全一致」，结果会一条都不剥。\n\n"
+                   "同名不等于同路径 —— 按文件名剥会把模组自己的贴图/网格剥掉，"
+                   "模组直接失效（这正是之前那个 bug）。\n\n"
+                   "请勾选「先生成官方资产清单」重新生成一份（几秒即可）；\n"
+                   "或勾选「同名也剥」走激进模式自行承担风险。"))
+            return
         # 清单是否可能过期（游戏更新会让本体 pak 变新）
         try:
             st = RC.check_manifest_freshness(manifest, game_paks)
@@ -296,7 +309,8 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
         for i, src in enumerate(paks, 1):
             q.put(("prog", (i - 1, total, _os.path.basename(src))))
             try:
-                d = RC.diagnose(src, official, strip_all=strip_all, log=log)
+                d = RC.diagnose(src, official, strip_all=strip_all,
+                                match_name=match_name, log=log)
                 if d.ok:
                     RC.convert(d, outdir, verify=verify, log=log)
             except Exception as ex:
@@ -451,14 +465,21 @@ class App:
                         text="激进模式：只要官方已有就剥离（包更小，但可能改坏贴图类 mod）"
                         ).grid(row=1, column=0, sticky="w")
 
+        self.match_name_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opt, variable=self.match_name_var,
+            text="同名也剥：文件名相同就当官方已有（默认关闭；同名≠同路径，"
+                 "开了有把模组贴图误剥的风险）"
+        ).grid(row=2, column=0, sticky="w")
+
         self.genman_var = tk.BooleanVar(value=False)
         chk = ttk.Checkbutton(
             opt, variable=self.genman_var,
             text="先生成官方资产清单（首次使用必做；游戏更新后重新生成）")
-        chk.grid(row=2, column=0, sticky="w")
+        chk.grid(row=3, column=0, sticky="w")
         self.game_var = tk.StringVar(value="游戏目录识别中…")
         ttk.Label(opt, textvariable=self.game_var,
-                  foreground="#666").grid(row=3, column=0, sticky="w", pady=(4, 0))
+                  foreground="#666").grid(row=4, column=0, sticky="w", pady=(4, 0))
 
         # ---- 按钮 ----
         bar = ttk.Frame(root, padding=(14, 6))
@@ -529,6 +550,8 @@ class App:
             self.verify_var.set(bool(self.cfg["verify"]))
         if "strip_all" in self.cfg:
             self.strip_all_var.set(bool(self.cfg["strip_all"]))
+        if "match_name" in self.cfg:
+            self.match_name_var.set(bool(self.cfg["match_name"]))
         if autostart and last and os.path.isdir(last):
             self.root.after(400, self.start)
 
@@ -659,7 +682,7 @@ class App:
                     "清单只写在你自己的电脑上（程序同目录的 "
                     f"{MANIFEST_NAME}），\n"
                     "不会上传、不包含任何游戏资产文件。\n\n"
-                    "游戏本体 pak 约 44 GB，扫描需要几分钟。现在开始吗？"):
+                    "游戏本体 pak 约 44 GB，但只读索引，几秒即可。现在开始吗？"):
                 return
             self.genman_var.set(True)      # 触发 worker 里的生成
             self.say("首次使用：先生成官方资产清单。", "head")
@@ -682,7 +705,8 @@ class App:
 
         # 记住本次选择
         self.cfg.update({"last_dir": d, "verify": bool(self.verify_var.get()),
-                         "strip_all": bool(self.strip_all_var.get())})
+                         "strip_all": bool(self.strip_all_var.get()),
+                         "match_name": bool(self.match_name_var.get())})
         save_config(self.cfg)
 
         self.running = True
@@ -701,7 +725,8 @@ class App:
             self.proc = ctx.Process(
                 target=_worker,
                 args=(d, self.outdir, manifest, bool(self.verify_var.get()),
-                      bool(self.strip_all_var.get()), game_paks, self.q),
+                      bool(self.strip_all_var.get()),
+                      bool(self.match_name_var.get()), game_paks, self.q),
                 daemon=True)
             self.proc.start()
         except Exception as ex:
@@ -921,7 +946,7 @@ def _selftest(moddir: str, verify: bool = False) -> int:
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     proc = ctx.Process(target=_worker,
-                       args=(moddir, outdir, man, verify, False, None, q),
+                       args=(moddir, outdir, man, verify, False, False, None, q),
                        daemon=True)
     proc.start()
 

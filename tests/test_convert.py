@@ -49,29 +49,29 @@ def main():
 
     # A. 混合：蓝图/数据（剥） + 贴图（留） + 独有（留）
     p = FX.make_pak(os.path.join(WORK, "A_mixed_P.pak"))
-    cases.append(("A 混合（蓝图+贴图）", p, FX.official_names(),
+    cases.append(("A 混合（蓝图+贴图）", p, FX.official_paths(),
                   {"verdict": "已转换（剥离冲突）", "dropped": 4, "kept": 5},
                   {"keep": FX.KEEP_ASSETS + FX.UNIQUE_ASSETS,
                    "drop": FX.CONFLICT_ASSETS}))
 
-    # B. 全是冲突型官方资产 -> 已被官方完全取代
+    # B. 全是冲突型官方资产 -> 已被官方完全取代（且不应产出空 pak）
     p = FX.make_pak(os.path.join(WORK, "B_allconflict_P.pak"),
                     {k: b"x" * 50 for k in FX.CONFLICT_ASSETS})
-    cases.append(("B 全是冲突型", p, FX.official_names(),
+    cases.append(("B 全是冲突型", p, FX.official_paths(),
                   {"verdict": "已被官方完全取代", "dropped": 4, "kept": 0},
                   {"keep": [], "drop": FX.CONFLICT_ASSETS}))
 
     # C. 全是资源替换型 -> 本来就可用
     p = FX.make_pak(os.path.join(WORK, "C_textures_P.pak"),
                     {k: b"t" * 80 for k in FX.KEEP_ASSETS})
-    cases.append(("C 全贴图替换", p, FX.official_names(),
+    cases.append(("C 全贴图替换", p, FX.official_paths(),
                   {"verdict": "本来就可用", "dropped": 0, "kept": 3},
                   {"keep": FX.KEEP_ASSETS, "drop": []}))
 
     # D. 全新内容（官方都没有）-> 本来就可用
     p = FX.make_pak(os.path.join(WORK, "D_new_P.pak"),
                     {k: b"n" * 60 for k in FX.UNIQUE_ASSETS})
-    cases.append(("D 全新内容", p, FX.official_names(),
+    cases.append(("D 全新内容", p, FX.official_paths(),
                   {"verdict": "本来就可用", "dropped": 0, "kept": 2},
                   {"keep": FX.UNIQUE_ASSETS, "drop": []}))
 
@@ -104,19 +104,27 @@ def main():
                     errs.append(f"应剥离但保留了: {k}")
             outdir = os.path.join(WORK, "out_" + os.path.basename(src))
             RC.convert(d, outdir, verify=False)
-            chk = P.read_pak(d.out_path)
-            if sorted(chk.all_paths()) != sorted(content["keep"]):
-                errs.append(f"写回内容不符: {sorted(chk.all_paths())}")
-            if os.path.isfile(UP):
-                r = subprocess.run([UP, d.out_path, "-Test"],
-                                   capture_output=True, timeout=600)
-                if r.returncode != 0:
-                    errs.append(f"官方 -Test 失败 rc={r.returncode}")
+            if not content["keep"]:
+                # ★ 一条都不剩时不应写出空 pak（空 pak 挂上去 = 模组变废）
+                if d.out_path:
+                    errs.append(f"不该产出文件，却有 {d.out_path}")
+                if os.path.isfile(os.path.join(outdir, os.path.basename(src))):
+                    errs.append("不该产出文件，但输出目录里有一个空 pak")
+            else:
+                chk = P.read_pak(d.out_path)
+                if sorted(chk.all_paths()) != sorted(content["keep"]):
+                    errs.append(f"写回内容不符: {sorted(chk.all_paths())}")
+                if os.path.isfile(UP):
+                    r = subprocess.run([UP, d.out_path, "-Test"],
+                                       capture_output=True, timeout=600)
+                    if r.returncode != 0:
+                        errs.append(f"官方 -Test 失败 rc={r.returncode}")
 
         if errs:
             print(f"[FAIL] {label}")
             for e in errs:
                 print(f"        {e}")
+            fails.append(label)
         else:
             extra = f"  kept={d.kept} dropped={d.dropped}" if d.ok else ""
             print(f"[PASS] {label:<18} -> {d.verdict}{extra}")

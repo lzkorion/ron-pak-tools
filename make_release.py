@@ -4,7 +4,7 @@
 
 用法（token 只用于这一次，不会写进任何文件）：
     set GITHUB_TOKEN=ghp_xxxx
-    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.0.0
+    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.0.1
 
 会做：
   1. 发布前合规检查（exe 内不得含游戏数据 / Epic 工具）
@@ -97,6 +97,39 @@ game installation. It is written only on your machine and never uploaded.
 - 可选调用你本机的 UnrealPak 做 `-List` / `-Test` 复核
 - **原始模组文件不会被修改**，结果输出到 `converted` 子目录
 
+## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.0.1
+
+v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常多写一层
+`ReadyOrNot/`（挂载点里已经有了），于是和官方永远「同路径匹配不上」、
+但文件名一样 —— 结果把**模组自己的贴图/网格**当成官方内容剥掉，模组直接失效。
+
+实测（原版 vs. v1.0.0 转换后的成对数据）：
+
+| 模组 | 条目 | v1.0.0 剥掉 | 其中误杀 | v1.0.1 剥掉 |
+|---|---|---|---|---|
+| Restoration | 39 | 33 | **25** 个骨骼网格/贴图 | 8（全是蓝图） |
+| VisceralBlud | 1125 | 155 | **151** 个贴图/贴花/MI | 4 |
+| VisceralGore | 523 | 31 | **31** 个网格/贴图/MI | 0（本来就可用） |
+| wound | 9 | **9（全剥光）** | 9 | 0（本来就可用） |
+
+`wound` 被剥到 0 条，pak 只剩 396 字节，装上去完全没效果。
+
+### v1.0.1 改了什么
+
+- **只信「路径完全一致」**：同名（`bare`）一律不剥；需要时用
+  GUI 的「同名也剥」/ `--match-name` 显式开启，且同名出现在多个目录时仍拒绝剥
+- 模组路径里重复的 `ReadyOrNot/`、`Content/` 前缀会自动去掉再比对，让真正的
+  同路径资产仍能被正确识别
+- **清单生成快了几百倍**：只读 pak 尾部 4 KB + 索引区
+  （原来要把 24 GB 的 `pakchunk0` 整份读进内存，常常直接失败跳过），
+  实测 25 个本体 pak / 约 44 GB **3 秒**扫完，47 万条全路径
+- 手上如果是只有文件名的旧清单，程序会**明确提示重新生成**，而不是静默什么都不做
+- 剥离后一条不剩时**不再产出空 pak**，而是明确告诉你「该模组已被官方取代，可以删除」
+- 新增 `tests/test_safety.py` 把「同名≠同路径」这条底线锁进测试
+
+已用四个真实模组端到端复核：官方 `UnrealPak -List` / `-Test` 全部 rc=0，
+孤儿 0、缺件 0、新增 0、挂载点不变。
+
 ## 校验和 / Checksum
 
 ```
@@ -139,7 +172,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="发布 exe 到 GitHub Releases")
     ap.add_argument("--user", required=True)
     ap.add_argument("--repo", default="ron-pak-tools")
-    ap.add_argument("--tag", default="v1.0.0")
+    ap.add_argument("--tag", default="v1.0.1")
     ap.add_argument("--name", default=None, help="Release 标题（默认同 tag）")
     ap.add_argument("--exe", default=os.path.join("dist", EXE_NAME))
     ap.add_argument("--dry-run", action="store_true")

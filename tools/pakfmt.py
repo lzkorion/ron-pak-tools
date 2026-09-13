@@ -643,6 +643,16 @@ def read_pak(path: str, *, strict: bool = True) -> "PakFile":
     return PakFile(path, strict=strict)
 
 
+def read_pak_index(path: str, *, tail_size: int = 4096) -> "PakIndex":
+    """只读目录索引（不碰数据区）。
+
+    给游戏本体 pak 建官方资产清单时用：pakchunk0 有 24 GB，
+    PakFile 会把它整个读进内存 —— 那不是慢，是直接爆内存。
+    我们只需要挂载点 + 路径，所以读「尾部 4 KB + 索引区」就够了。
+    """
+    return PakIndex(path, tail_size=tail_size)
+
+
 class PakFile:
     """Read-only pak parser with index and data-area access."""
 
@@ -655,7 +665,26 @@ class PakFile:
         self._read_index()
 
     def _read_footer(self):
-        d = self.data
+        """整份数据都在内存里，直接扫它自己的尾部。"""
+        self._load_footer(self.data, 0, len(self.data))
+
+    def _load_footer(self, win: bytes, win_base: int, file_size: int,
+                     read_index=None) -> int:
+        """在 win（文件尾部窗口）里定位 footer，并填好 pak 级字段。
+
+        win_base:    win[0] 在整个文件里的绝对偏移
+        file_size:   整个文件的字节数（偏移合法性用得到）
+        read_index:  read_index(off, size) -> bytes，只用于索引 SHA1 自检。
+                     不给就表示 win 里已经含有索引区（整份数据在内存的情形）。
+        返回 footer 在 win 内的相对偏移。
+
+        拆出来是为了让 PakIndex 只读「尾部 + 索引区」也能复用同一套校验，
+        而不是把 24 GB 的本体 pak 整个读进内存。
+        """
+        d = win
+        if read_index is None:
+            def read_index(off, sz):          # noqa: F811
+                return d[off - win_base:off - win_base + sz]
         found = None
         for i in range(len(d) - 4, max(0, len(d) - 4096), -1):
             if struct.unpack_from("<I", d, i)[0] != MAGIC:
@@ -664,14 +693,14 @@ class PakFile:
             if ver not in range(1, 13):
                 continue
             idx_off, idx_sz = struct.unpack_from("<qq", d, i + 8)
-            if idx_off < 0 or idx_sz < 0 or idx_off + idx_sz > len(d):
+            if idx_off < 0 or idx_sz < 0 or idx_off + idx_sz > file_size:
                 continue
-            if hashlib.sha1(d[idx_off:idx_off + idx_sz]).digest() == d[i + 24:i + 44]:
+            if hashlib.sha1(read_index(idx_off, idx_sz)).digest() == d[i + 24:i + 44]:
                 found = i
                 break
         if found is None:
             raise PakError("no valid pak footer (magic + index SHA1 self-check failed)")
-        self.footer_offset = found
+        self.footer_offset = win_base + found
         self.version = struct.unpack_from("<i", d, found + 4)[0]
         self.index_offset, self.index_size = struct.unpack_from("<qq", d, found + 8)
         self.index_hash = d[found + 24:found + 44]
@@ -682,10 +711,18 @@ class PakFile:
             m = d[base + k * COMPRESSION_METHOD_NAME_LEN:
                   base + (k + 1) * COMPRESSION_METHOD_NAME_LEN]
             self.compression_methods.append(m.split(b"\x00")[0].decode("ascii", "replace"))
+        return found
 
-    def _read_index(self):
-        d = self.data
-        p = self.index_offset
+    def _read_index(self, data: bytes | None = None, base: int = 0):
+        """解析索引区。
+
+        data/base: data[0] 在文件里的绝对偏移是 base。
+                   PakFile 传整份数据（base=0）；PakIndex 只传索引区，
+                   于是 phi/fdi 的偏移会被换算成「相对 data」，
+                   这样 read_directory_index() 等下游代码两边都能直接用。
+        """
+        d = self.data if data is None else data
+        p = self.index_offset - base
         self.mount_point, p = r_str(d, p)
         self.num_entries = struct.unpack_from("<i", d, p)[0]
         p += 4
@@ -697,7 +734,7 @@ class PakFile:
         p += 4
         if self.has_phi:
             off, size = struct.unpack_from("<qq", d, p)
-            self.phi = SecondaryIndex(off, size, d[p + 16:p + 36])
+            self.phi = SecondaryIndex(off - base, size, d[p + 16:p + 36])
             p += 36
         else:
             self.phi = None
@@ -706,7 +743,7 @@ class PakFile:
         p += 4
         if self.has_fdi:
             off, size = struct.unpack_from("<qq", d, p)
-            self.fdi = SecondaryIndex(off, size, d[p + 16:p + 36])
+            self.fdi = SecondaryIndex(off - base, size, d[p + 16:p + 36])
             p += 36
         else:
             self.fdi = None
@@ -830,3 +867,45 @@ class PakFile:
         if 0 <= i < len(self.non_encodable):
             return self.non_encodable[i]
         return None
+
+
+class PakIndex(PakFile):
+    """只读 pak 的【目录索引】，不加载数据区。
+
+    ★ 为什么需要它：游戏本体 pakchunk0 有 24 GB。PakFile 是 f.read() 全量载入，
+      在 32 GB 内存的机器上勉强能跑，但既慢又危险；而给官方资产清单建索引
+      只需要「挂载点 + 路径 + 压缩方法」，全都在索引区里。
+
+    对外接口与 PakFile 一致（mount_point / all_paths / read_directory_index /
+    encoded_entries / version / compression_methods ...），差别只有两点：
+      · self.data 只覆盖索引区（因此 payload_of / read_entry_bytes 不可用）
+      · 索引 SHA1 自检照做，损坏的 pak 一样会被拒绝
+    """
+
+    def __init__(self, path: str, strict: bool = True, tail_size: int = 4096):
+        self.path = path
+        self.strict = strict
+        size = os.path.getsize(path)
+        win_base = max(0, size - tail_size)
+
+        def read_at(fh, off, n):
+            fh.seek(off)
+            return fh.read(n)
+
+        with open(path, "rb") as fh:
+            win = read_at(fh, win_base, tail_size)
+            self._load_footer(win, win_base, size,
+                              lambda off, n: read_at(fh, off, n))
+            # 索引 = 主索引（index_offset..index_offset+index_size）
+            #      + 紧随其后的两个二级索引（FPathHashIndex / FDirectoryIndex），
+            #      一直到 footer 为止 —— fdi 的偏移在 index_size 之外。
+            span = self.footer_offset - self.index_offset
+            if span < self.index_size:
+                raise PakError(f"索引区范围异常：index_offset={self.index_offset} "
+                               f"footer={self.footer_offset}")
+            idx = read_at(fh, self.index_offset, span)
+        if len(idx) != span:
+            raise PakError(f"索引区读不全：要 {span} 字节，实际 {len(idx)} 字节")
+        self.data = idx
+        self._read_index(idx, self.index_offset)
+

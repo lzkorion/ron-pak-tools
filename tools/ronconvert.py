@@ -17,6 +17,14 @@
       「扩展名是 .uasset/.umap 且路径像蓝图/逻辑/数据资产」的官方同名条目，
     其余一律保留。宁可少剥，不可把正常 mod 改坏。
 
+★ 「同名」不等于「同路径」
+    上面那条还不够：判定「官方已有」必须要求**路径完全一致**（full）。
+    真实模组常写成 mount='../../../ReadyOrNot/Content/' + 'ReadyOrNot/Character/...'
+    （路径里多带一层 ReadyOrNot），于是和官方永远「同路径匹配不上」，
+    但**文件名**和官方某个资产一样。如果按文件名就判「官方已有」，
+    就会把模组自己的贴图/网格当成官方内容剥掉 —— 模组直接失效。
+    所以默认只信 full；只想同名就剥必须显式加 --match-name。
+
 用法
     # 整个目录批量转换
     python tools/ronconvert.py "C:\\ron模组"
@@ -24,13 +32,16 @@
     # 先看诊断，不写文件
     python tools/ronconvert.py "C:\\ron模组" --dry-run
 
+    # 从游戏本体 paks 生成全路径清单（几秒），再做转换
+    python tools/ronconvert.py "C:\\ron模组" --game-paks "E:\\...\\ReadyOrNot\\Content\\Paks"
+
     # 转换并调用官方工具复核
     python tools/ronconvert.py "C:\\ron模组" --verify
 
     # 单个文件
     python tools/ronconvert.py "某模组.pak"
 
-    # 强制全部剥离（官方已有的路径一律丢弃，包最小但可能改坏贴图类 mod）
+    # 激进模式：官方已有的路径一律丢弃，包最小但可能改坏贴图类 mod
     python tools/ronconvert.py "C:\\ron模组" --strip-all
 """
 from __future__ import annotations
@@ -101,37 +112,88 @@ KEEP_MARKERS = (
     "/internationalization/",
 )
 
-# 打包/派生文件扩展名（当同名的 .uasset 被保留时，它们也必须保留）
+# ---------------------------------------------------------------------------
+# 资产分组：UE 里「一个资产」= 多个条目
+#   <Stem>.uasset / <Stem>.umap   （包头，含导入导出表与 Name Table）
+#   <Stem>.uexp                   （导出数据）
+#   <Stem>.ubulk                  （大体积二进制载荷）
+#   <Stem>.uptnl                  （可选载荷）
+#   <Stem>.m.ubulk                （移动端变体）
+# 模组里还常带 .bak 备份变体（如 X.uasset.bak），它们同样是该资产的一部分。
+#
+# ★ 只有把这【一整组】当一个整体处理，才不会留下孤儿。
+#   之前的实现只把 .uasset/.umap 当组头，导致 X.uasset.bak 这类
+#   变体不会被跟着剥掉，可能让引擎读到新旧混合的组合 → 崩溃/失效。
+ASSET_EXT_CHAIN = (
+    ".m.ubulk",
+    ".uasset", ".umap", ".uexp", ".ubulk", ".uptnl",
+    ".uasset.bak", ".umap.bak", ".uexp.bak", ".ubulk.bak", ".uptnl.bak",
+)
+# 兼容旧名字
 PACKAGE_EXTS = (".uasset", ".umap")
-SIDECAR_EXTS = (".uexp", ".ubulk", ".uptnl", ".m.ubulk")
+
+
+def asset_stem(rel: str) -> str:
+    """把一个条目路径还原成它所属【资产】的名字。
+
+        X.uasset          -> X
+        X.uexp            -> X
+        X.uasset.bak      -> X
+        X.m.ubulk         -> X
+        A/B/X.ubulk.bak   -> A/B/X
+    认不出来的（如 .ini/.bin/无扩展名）原样返回，单独成组。
+    """
+    low = rel.lower()
+    for ext in ASSET_EXT_CHAIN:
+        if low.endswith(ext):
+            return rel[:len(rel) - len(ext)]
+    return rel
+
+
+def asset_members(elist) -> dict:
+    """把条目按资产分组：{资产名: [条目, ...]}"""
+    groups: dict[str, list] = {}
+    for e in elist:
+        groups.setdefault(asset_stem(e.rel), []).append(e)
+    return groups
+
 
 
 # ===========================================================================
 # 官方资产清单
 # ===========================================================================
 class OfficialAssets:
-    """官方已有路径的索引，支持「全路径」与「裸文件名」两级匹配。
+    """官方已有路径的索引。
 
-    两级匹配的必要性：
-      · 从游戏 paks 生成的「全路径清单」里条目带目录，可以精确匹配
-        （同名不同目录不会误判）。
-      · 旧的 game_manifest.json 只有裸文件名（177241 条里 177233 条没斜杠），
-        只能用文件名匹配，会偏保守（宁可少剥）。
-    因此：带斜杠的条目进 full 集合，所有条目都进 bare 集合。
+    ★ 匹配强度分三级（这是本工具最关键的安全机制）：
+
+        full   路径完全一致 —— 可以确定模组覆盖的是同一个资产。可信。
+        bare   路径不同但【文件名】相同 —— 只是「同名」。不可信！
+        none   都没有。
+
+    为什么必须区分：真实模组常把路径写成
+        mount='../../../ReadyOrNot/Content/'  +  'ReadyOrNot/Character/Gore/.../T_X'
+    路径里多带一层 ReadyOrNot，于是「和官方同路径」永远匹配不上，
+    但文件名和官方某个资产一样。如果按文件名就判定「官方已有」，
+    会把**模组自己的贴图/网格**当成官方内容剥掉 —— 模组直接失效。
+
+    因此默认策略：**只信 full；bare 命中判为「存疑」，不剥。**
+    需要更激进时用 --match-name 显式开启，并且只在有辅助证据时才剥。
     """
 
     def __init__(self, manifest_path: str | None = None):
         self.full: set[str] = set()
         self.bare: set[str] = set()
+        self.bare_ambiguous: set[str] = set()   # 同名但出现在多个目录 → 更不可信
         self.source = "(未加载)"
-        self.generated_at: float | None = None    # 清单生成时间（若清单里记了）
+        self.generated_at: float | None = None
+        self._name_count: dict[str, int] = {}   # 裸名出现次数，用来判歧义
         if manifest_path and os.path.isfile(manifest_path):
             self._load_manifest(manifest_path)
 
     @staticmethod
     def _normalize(rel: str) -> str:
         s = rel.replace("\\", "/").strip().lower()
-        # 折叠 ../ 与 ./，并去掉挂载点前缀留下的相对段
         while s.startswith("../"):
             s = s[3:]
         s = posixpath.normpath("/" + s.lstrip("/")).lstrip("/")
@@ -139,14 +201,43 @@ class OfficialAssets:
 
     @classmethod
     def full_path_of(cls, mount: str, rel: str) -> str:
-        """模组内的 (mount, rel) -> 官方命名空间下的全路径。
-
-        模组: mount='../../../ReadyOrNot/' rel='Content/A.uasset' -> 'readyornot/content/a.uasset'
-        官方: mount='../../../'          entry='ReadyOrNot/Content/A.uasset' -> 同上
-        """
+        """模组内的 (mount, rel) -> 官方命名空间下的全路径。"""
         m = mount.replace("\\", "/")
         combined = m.rstrip("/") + "/" + rel.lstrip("/") if m.strip("/") else rel
         return cls._normalize(combined)
+
+    @classmethod
+    def stem_variants(cls, mount: str, rel: str) -> list[str]:
+        """模组条目可能对应的【官方全路径】候选。
+
+        真实模组的路径常把挂载点里已有的那一两层又写了一遍，例如
+
+            mount = '../../../ReadyOrNot/Content/'
+            rel   = 'ReadyOrNot/Content/Blueprints/Items/BP_Gun.uasset'   <- 两层都重复
+            rel   = 'ReadyOrNot/Character/Gore/T_X.uasset'                <- 只重复一层
+
+        直接拼会得到 '.../readyornot/content/readyornot/content/...'，永远匹配不上。
+        所以额外试「把开头重复的 readyornot/ 、content/ 各去掉一层」的版本，
+        让 full 匹配有机会命中真正的官方路径。
+        """
+        m = mount.replace("\\", "/")
+        r = rel.replace("\\", "/").lstrip("/")
+        prefix = m.rstrip("/") + "/" if m.strip("/") else ""
+
+        def join(rest: str) -> str:
+            return cls._normalize(prefix + rest if prefix else rest)
+
+        cands = [join(r)]
+        rest = r
+        for _ in range(2):          # 最多去掉两层（readyornot/ 和 content/）
+            head, sep, tail = rest.partition("/")
+            if not sep or head.lower() not in ("readyornot", "content"):
+                break
+            rest = tail
+            c = join(rest)
+            if c not in cands:
+                cands.append(c)
+        return cands
 
     def _load_manifest(self, path: str) -> None:
         with open(path, encoding="utf-8") as f:
@@ -159,19 +250,35 @@ class OfficialAssets:
                 continue
             if "/" in s:
                 self.full.add(s)      # 只有真正带目录的才算「全路径」
-            self.bare.add(s.rsplit("/", 1)[-1])
-        self.source = f"{path}（{len(names)} 条）"
+            b = s.rsplit("/", 1)[-1]
+            self.bare.add(b)
+            c = self._name_count.get(b, 0) + 1
+            self._name_count[b] = c
+            if c > 1:
+                self.bare_ambiguous.add(b)   # 同名出现在多处 → 不敢剥
+        self.source = f"{path}（{len(names)} 条，全路径 {len(self.full)} 条）"
 
     def add_paths(self, paths) -> None:
+        """加入【官方命名空间下的全路径】（= 挂载点 + 挂载内相对路径）。
+
+        ★ 一定要传全路径。只传裸文件名的话 full 索引是空的，
+          默认策略下就永远匹配不上 → 工具等于什么都不做。
+        """
         for n in paths:
             s = self._normalize(n)
             if not s:
                 continue
-            self.full.add(s)
-            self.bare.add(s.rsplit("/", 1)[-1])
+            if "/" in s:
+                self.full.add(s)
+            b = s.rsplit("/", 1)[-1]
+            self.bare.add(b)
+            c = self._name_count.get(b, 0) + 1
+            self._name_count[b] = c
+            if c > 1:
+                self.bare_ambiguous.add(b)
 
     def has(self, full_path: str) -> tuple[bool, str]:
-        """返回 (是否官方已有, 命中方式)。传入路径会先归一化，大小写不敏感。"""
+        """返回 (是否官方已有, 命中方式: full / bare / '')。"""
         s = self._normalize(full_path)
         if not s:
             return False, ""
@@ -182,23 +289,36 @@ class OfficialAssets:
         return False, ""
 
     def __len__(self) -> int:
-        """条目总数。
-
-        注意用 bare 而不是 full：内置清单全是裸文件名，full 会是 0
-        （从 v1.1 起 full 只放真正带目录的路径）。
-        """
+        """官方资产条目总数（用 bare 计，因为它是 full 的「去重后名字」）。"""
         return len(self.bare)
+
+    @property
+    def has_full_index(self) -> bool:
+        """清单里是否有全路径。
+
+        没有的话（旧的裸名清单）默认策略下永远匹配不上，工具会空转 ——
+        必须提示用户重新生成清单，而不是静默「什么都不做」。
+        """
+        return bool(self.full)
 
 
 def build_manifest_from_game_paks(paks_dir: str, out_json: str,
                                   verbose: bool = True, progress=None) -> int:
-    """用自研解析器从游戏 paks 生成【全路径】清单（比裸文件名匹配准确得多）。
+    """用自研解析器从游戏 paks 生成【全路径】清单。
+
+    ★ 写出的必须是「挂载点 + 挂载内路径」的**全路径**（如
+      readyornot/content/blueprints/items/bp_gun.uasset）。
+      只写裸文件名会让 full 索引为空 —— 默认的保守策略（只信路径一致）
+      就永远匹配不上，工具会变成什么都不做的空转。
 
     ★ 只统计游戏本体 pak（pakchunk<N>-<Platform>.pak），跳过玩家装的模组。
       否则模组内容会被写进「官方清单」，之后判定就会认为「官方已有」→ 全被剥掉。
 
+    ★ 用 read_pak_index 只读索引：本体 pakchunk0 有 24 GB，
+      全量读入既慢又可能爆内存，而我们只需要挂载点 + 路径。
+
     progress: 可选的 callable(stage:str, done:int, total:int, note:str)，
-              用于把进度报给 GUI（扫 44GB 要几分钟）。
+              用于把进度报给 GUI。
     """
     def rep(stage, done, total, note=""):
         if progress:
@@ -236,8 +356,10 @@ def build_manifest_from_game_paks(paks_dir: str, out_json: str,
                           flush=True)
         rep("pak", i - 1, len(files), f"{name}（{size_mb} MB）")
         try:
-            pk = P.read_pak(path)
-            official.add_paths(pk.all_paths())
+            pk = P.read_pak_index(path)
+            mount = pk.mount_point
+            official.add_paths(OfficialAssets.full_path_of(mount, p)
+                               for p in pk.all_paths())
             del pk
             if verbose:
                 _emit_default(verbose, f" 累计 {len(official)}")
@@ -246,7 +368,7 @@ def build_manifest_from_game_paks(paks_dir: str, out_json: str,
                 _emit_default(verbose,
                               f" 跳过（{type(ex).__name__}: {ex}）")
         rep("pak", i, len(files), name)
-    write_manifest(out_json, official.bare, {
+    write_manifest(out_json, official.full, {
         "source_dir": paks_dir,
         "pak_count": len(files),
         "skipped_paks": skipped,
@@ -255,7 +377,7 @@ def build_manifest_from_game_paks(paks_dir: str, out_json: str,
     if verbose:
         _emit_default(
             verbose,
-            f"   已写出 {out_json}：{len(official)} 条，"
+            f"   已写出 {out_json}：全路径 {len(official.full)} 条，"
             f"耗时 {time.time()-t0:.1f}s")
     return len(official)
 
@@ -477,6 +599,8 @@ class Diagnosis:
     verify: dict = field(default_factory=dict)
     seconds: float = 0.0
     copied: bool = False          # 无需改动，原样复制
+    matched_full: int = 0         # 路径完全一致（可信）
+    matched_bare: int = 0         # 仅文件名相同（存疑，默认不剥）
     # 内部工作数据（不参与序列化）
     _elist: list = field(default_factory=list, repr=False)
     _drop: set = field(default_factory=set, repr=False)
@@ -534,7 +658,18 @@ def read_mod(path: str) -> tuple[P.PakFile, dict[str, P.PakEntry]]:
 
 
 def diagnose(src: str, official: OfficialAssets, *, strip_all: bool = False,
-             verbose: bool = True, log=None) -> Diagnosis:
+             match_name: bool = False, verbose: bool = True,
+             log=None) -> Diagnosis:
+    """诊断一个模组。
+
+    match_name=False（默认，安全）：
+        只剥「路径也一致」的资产。仅文件名相同的一律视为【存疑】，不剥。
+        真实模组常把路径写成 mount + 'ReadyOrNot/Content/...'（多一层），
+        按文件名判定会把模组自己的贴图/网格当成官方内容剥掉 → 模组失效。
+
+    match_name=True（激进，需显式开启）：
+        文件名相同也剥，但要求额外证据（同名不歧义，或条数与官方一致）。
+    """
     emit = log or (print if verbose else (lambda *_a, **_k: None))
     d = Diagnosis(src=src)
     t0 = time.time()
@@ -563,39 +698,64 @@ def diagnose(src: str, official: OfficialAssets, *, strip_all: bool = False,
     elist: list[Entry] = []
     for rel, pe in sorted(entries.items()):
         ext = os.path.splitext(rel)[1].lower()
-        full = OfficialAssets.full_path_of(pk.mount_point, rel)
-        has, how = official.has(full)
+        # 主路径 + 「去掉重复前缀」的候选，让 full 匹配有机会命中
+        cands = OfficialAssets.stem_variants(pk.mount_point, rel)
+        full = cands[0]
+        has, how = False, ""
+        for c in cands:
+            h, w = official.has(c)
+            if h:
+                has, how = h, w
+                if w == "full":
+                    full = c
+                    break
         conflict = _is_conflict_type(rel, ext)
         elist.append(Entry(rel=rel, path=pe, full=full, official=has,
                            official_by=how, conflict=conflict))
     by_rel = {e.rel: e for e in elist}
 
+    # 统计匹配强度，便于报告
+    d.matched_full = sum(1 for e in elist if e.official_by == "full")
+    d.matched_bare = sum(1 for e in elist if e.official_by == "bare")
+
     # ---- 决定丢弃集合 ----
-    # UE 里一个资产 = 多个条目（.uasset/.umap + .uexp/.ubulk/.uptnl）。
-    # 只剥其中一部分会留下"孤儿"（例如 asset 没了但 uexp 还在），
-    # 可能让引擎读到不匹配的组合。所以按【资产 stem】成组处理：
-    #   某 stem 下只要有【任何一个】可剥的 .uasset/.umap，整个 stem 一起剥。
+    # ★ 两条铁律：
+    #   1) 按【资产】整组处理（一个资产 = .uasset + .uexp + .ubulk + .bak 变体），
+    #      否则会留孤儿，引擎读到新旧混合 → 崩溃。
+    #   2) 只信【路径一致】（full）的证据。只有文件名相同（bare）不算数 ——
+    #      真实模组路径常多一层 ReadyOrNot/，按文件名判会把模组自己的
+    #      贴图/网格当成官方内容剥掉，模组直接失效。
+    groups = asset_members(elist)
+
+    def evidence_ok(e) -> bool:
+        if e.official_by == "full":
+            return True
+        if not match_name:
+            return False
+        # 激进模式下的额外证据要求
+        bare = e.rel.rsplit("/", 1)[-1].lower()
+        if bare in official.bare_ambiguous:
+            return False          # 同名出现在多个目录 → 不敢剥
+        return e.conflict         # 只对冲突型（蓝图/逻辑）放宽
+
     drop: set[str] = set()
     for e in elist:
+        if not evidence_ok(e):
+            continue
         ext = os.path.splitext(e.rel)[1].lower()
         if strip_all:
-            if e.official and ext in (".uasset", ".umap", ".uexp", ".ubulk",
-                                      ".uptnl", ".ini", ".bin"):
+            if ext in (".uasset", ".umap", ".uexp", ".ubulk",
+                       ".uptnl", ".ini", ".bin"):
                 drop.add(e.rel)
-            continue
-        if e.official and e.conflict:
+        elif e.conflict and ext in PACKAGE_EXTS:
             drop.add(e.rel)
 
-    all_stems = {os.path.splitext(e.rel)[0] for e in elist}
-    dropped_stems: set[str] = set()
-    for rel in drop:
-        stem, ext = os.path.splitext(rel)
-        if ext.lower() in PACKAGE_EXTS:
-            dropped_stems.add(stem)
-    for e in elist:
-        stem, ext = os.path.splitext(e.rel)
-        if ext.lower() in SIDECAR_EXTS and stem in dropped_stems:
-            drop.add(e.rel)
+    # 整组剥离：某个资产只要有成员被剥，它的全部成员一起剥
+    for stem, members in groups.items():
+        if any(m.rel in drop for m in members):
+            for m in members:
+                if m.rel.lower().endswith(ASSET_EXT_CHAIN):
+                    drop.add(m.rel)
 
     d.conflict_entries = sum(1 for e in elist if e.conflict)
     d.official_entries = sum(1 for e in elist if e.official)
@@ -604,8 +764,9 @@ def diagnose(src: str, official: OfficialAssets, *, strip_all: bool = False,
     d.kept = d.total_entries - d.dropped
 
     emit(f"   版本 {d.version}   挂载点 {d.mount!r}   方法 {d.methods}")
-    emit(f"   条目 {d.total_entries}（恢复路径 {d.recovered}）"
-         f"   官方已有 {d.official_entries}   冲突型 {d.conflict_entries}")
+    emit(f"   条目 {d.total_entries}（恢复路径 {d.recovered}）")
+    emit(f"   官方匹配：路径一致 {d.matched_full} 条（可信）"
+         f"  仅同名 {d.matched_bare} 条（存疑，默认不剥）")
     for p in d.problems:
         emit(f"   ⚠ {p}")
 
@@ -636,6 +797,16 @@ def convert(d: Diagnosis, outdir: str, *, verify: bool = False,
     elist: list[Entry] = d._elist
     drop: set[str] = d._drop
     tv = target_version or d.version
+
+    if d.kept == 0:
+        # ★ 一条都不剩时【不要写空包】。
+        #   空 pak 挂上去只会让游戏加载一个什么都没有的模组（之前的 wound
+        #   模组就是这么变成 396 字节废包的）。正确做法是明确告诉用户：
+        #   这个模组的内容已经被官方取代，可以直接删掉。
+        emit("   剥离后无剩余内容，不生成新 pak。")
+        d.actions.append("不生成新 pak（内容已被官方完全取代，原模组可直接删除）")
+        d.copied = False
+        return d
 
     if d.dropped == 0 and tv == d.version:
         # 完全不需要改：直接复制，保证字节一致、零风险
@@ -760,9 +931,12 @@ def main() -> int:
     ap.add_argument("--manifest", default="game_manifest.json",
                     help="官方资产清单（默认 game_manifest.json）")
     ap.add_argument("--game-paks", default=None,
-                    help="直接从游戏 Paks 目录读官方清单（最准，需数分钟）")
+                    help="直接从游戏 Paks 目录读官方清单（最准，几秒即可）")
     ap.add_argument("--strip-all", action="store_true",
                     help="激进模式：官方已有的路径一律剥离（可能改坏贴图类 mod）")
+    ap.add_argument("--match-name", action="store_true",
+                    help="激进模式：文件名相同也算「官方已有」（默认关闭，"
+                         "因为同名不等于同路径，会把模组自己的贴图剥掉）")
     ap.add_argument("--target-version", type=int, default=None,
                     help=f"输出 pak 版本（默认跟随源；当前游戏为 {PAK_VERSION_LATEST}）")
     ap.add_argument("--verify", action="store_true",
@@ -783,13 +957,14 @@ def main() -> int:
         cache = "game_manifest_full.json"
         build_manifest_from_game_paks(args.game_paks, cache)
         official = OfficialAssets(cache)
-    print(f"官方资产清单：{official.source}   全路径 {len(official.full)} 条")
+    print(f"官方资产清单：{official.source}")
     if len(official) == 0:
         print("⚠ 清单为空，无法判断「官方已有」。请先运行：")
-        print('   python tools\\ronadapt.py --game-manifest "...\\pakchunk0-Windows.pak"')
-        print("   或加 --game-paks <游戏Paks目录> 自动生成全路径清单")
-    elif not args.manifest or not os.path.isfile(args.manifest):
-        print("  （裸文件名匹配：可能出现同名误判，建议用 --game-paks 生成全路径清单）")
+        print("   加 --game-paks <游戏Paks目录> 自动生成全路径清单")
+    elif not official.has_full_index:
+        print("⚠ 这份清单【只有裸文件名】，没有全路径 ——")
+        print("   默认策略只信「路径完全一致」，此时会一条都不剥（工具空转）。")
+        print("   请用 --game-paks 重新生成，或改加 --match-name 走激进模式。")
 
     paks = find_paks(target)
     if not paks:
@@ -806,7 +981,8 @@ def main() -> int:
     results: list[Diagnosis] = []
     for i, src in enumerate(paks, 1):
         print(f"\n[{i}/{len(paks)}]", end=" ")
-        d = diagnose(src, official, strip_all=args.strip_all)
+        d = diagnose(src, official, strip_all=args.strip_all,
+                     match_name=args.match_name)
         if not args.dry_run and d.ok:
             convert(d, outdir, verify=args.verify,
                     target_version=args.target_version)

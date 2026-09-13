@@ -56,6 +56,14 @@ def main():
     check(n == 2, f"只收录本体内容（实得 {n} 条）")
     check(any("t_official_sample.uasset" in x for x in names), "本体资产在清单里")
     check(not any("frommod.uasset" in x for x in names), "模组资产未被写入")
+    # ★ 回归保护：清单必须写【全路径】。曾经写成裸文件名（official.bare），
+    #   于是 full 索引恒为空 —— 默认策略下工具一条都不剥，等于空转。
+    check(all("/" in x for x in names),
+          "清单里是全路径（不是裸文件名）",
+          f"例：{names[0] if names else '(空)'}")
+    check(any(x.startswith("content/") or x.startswith("readyornot/")
+              for x in names),
+          "全路径带挂载点前缀")
     check(data.get("skipped_paks") == ["pakchunk9999-Mods_Test_P.pak"],
           "记录了被跳过的模组")
     check("generated_at" in data, "清单带生成时间戳")
@@ -81,6 +89,7 @@ def main():
     man = FX.write_manifest(os.path.join(WORK, "m.json"), FX.official_names())
     off = RC.OfficialAssets(man)
     check(len(off) == len(off.bare), f"len() = 文件名条目数（{len(off)}）")
+    check(off.has_full_index is False, "裸名清单：没有全路径索引（工具会空转，但不误剥）")
     fp = RC.OfficialAssets.full_path_of(
         "../../../ReadyOrNot/", "Content/Blueprints/Items/X.uasset")
     check(fp == "readyornot/content/blueprints/items/x.uasset",
@@ -89,7 +98,22 @@ def main():
     sample = next(iter(off.bare))
     hit, how = off.has(RC.OfficialAssets.full_path_of(
         "../../../ReadyOrNot/Content/", "AnyDir/" + sample))
-    check(hit is True, f"已知存在的文件名能命中（方式={how}）")
+    check(hit is True and how == "bare",
+          f"只有同名时命中的是 bare（不可信）（方式={how}）")
+
+    print("\n4b) 全路径清单（真实本体 pak 的形状）")
+    fullman = FX.write_manifest(os.path.join(WORK, "full.json"),
+                               FX.official_paths())
+    off2 = RC.OfficialAssets(fullman)
+    check(off2.has_full_index is True, f"有全路径索引（{len(off2.full)} 条）")
+    real = FX.CONFLICT_ASSETS[0]
+    # 模组挂载点 + 挂载内路径 == 本体 pak 的 ../../../ + ReadyOrNot/Content/...
+    mod_side = RC.OfficialAssets.full_path_of(FX.MOUNT, real)
+    game_side = RC.OfficialAssets.full_path_of("../../../",
+                                               "ReadyOrNot/Content/" + real)
+    check(mod_side == game_side, f"两边拼出同一条全路径: {mod_side}")
+    check(off2.has(game_side) == (True, "full"),
+          "同一路径 -> full 命中（可信）")
 
     print("\n5) 本机没装游戏时不应崩")
     check(RC.find_game_paks([r"Z:\definitely\not\here"]) is None
