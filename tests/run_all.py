@@ -25,6 +25,7 @@ TESTS = [
     ("资产整组剥离 (.bak 变体)", "test_grouping.py", False),
     ("安全底线 (同名≠同路径)", "test_safety.py", False),
     ("体检模式 (为什么没效果)", "test_health.py", False),
+    ("引用分析 (引用的资产还在不在)", "test_refs.py", False),
     ("检测 / 清单新鲜度", "test_detect.py", False),
     ("GUI 冒烟 / 配置记忆", "test_gui_smoke.py", True),
     ("GUI 端到端", "test_gui_e2e.py", True),

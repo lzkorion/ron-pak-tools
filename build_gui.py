@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """用 PyInstaller 打包 GUI（从 Python 调用，避免 shell 把非 ASCII 路径弄乱）。
 
@@ -26,6 +26,7 @@ DATAS = [
     (os.path.join("tools", "pakfmt.py"), "."),
     (os.path.join("tools", "ronconvert.py"), "."),
     (os.path.join("tools", "ronhealth.py"), "."),
+    (os.path.join("tools", "ronrefs.py"), "."),
 ]
 # 明确禁止被打包进发行物的东西（构建时校验，防止误打包）
 FORBIDDEN = [
@@ -38,8 +39,8 @@ FORBIDDEN = [
 VERSION_INFO = """
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 6, 0, 0),
-    prodvers=(1, 6, 0, 0),
+    filevers=(1, 7, 0, 0),
+    prodvers=(1, 7, 0, 0),
     mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0,
     date=(0, 0)
   ),
@@ -48,12 +49,12 @@ VSVersionInfo(
       StringTable('080404B0', [
         StringStruct('CompanyName', ''),
         StringStruct('FileDescription', 'RoN Pak Tools'),
-        StringStruct('FileVersion', '1.6.0.0'),
+        StringStruct('FileVersion', '1.7.0.0'),
         StringStruct('InternalName', 'ronconvert_gui'),
         StringStruct('LegalCopyright', ''),
         StringStruct('OriginalFilename', 'RoNPakTools.exe'),
         StringStruct('ProductName', 'RoN Pak Tools'),
-        StringStruct('ProductVersion', '1.6.0.0')
+        StringStruct('ProductVersion', '1.7.0.0')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])

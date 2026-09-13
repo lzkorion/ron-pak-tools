@@ -441,11 +441,13 @@ VERDICTS = {
 
 def assess(src: str, official: RC.OfficialAssets | None = None, *,
            paks_dir: str | None = None, peers: list[dict] | None = None,
-           verify: bool = False, log=None) -> dict:
+           verify: bool = False, refs: bool = False, log=None) -> dict:
     """先诊断：给出「该不该转换」的结论，然后再决定要不要转。
 
+    refs=True 时额外做【引用分析】（慢：要把每个 .uasset 解开读引用表）。
+
     返回 dict：{verdict, label, why, reasons[], should_convert, health, diag,
-                kinds[], kind_note, rename}
+                kinds[], kind_note, rename, refs}
     """
     emit = log or (lambda *_a, **_k: None)
     # check() 内部会自己扫 peers，但 assess 自己算冲突也要用 —— 先补上，
@@ -455,10 +457,23 @@ def assess(src: str, official: RC.OfficialAssets | None = None, *,
     h = check(src, official, paks_dir=paks_dir, peers=peers, verify=verify)
     out = {"src": src, "name": h["name"], "ok": h["ok"], "health": h,
            "reasons": [], "diag": None, "kinds": [], "kind_note": "",
+           "refs": None,
            "rename": {"needed": False, "new_name": h["name"], "reasons": []}}
 
     def finish(code):
         label, why = VERDICTS[code]
+        # 引用分析（如果做了）的结论：放在最后说，它是「转换救不了」那一类问题
+        rr = out.get("refs") or {}
+        br = rr.get("broken") or {}
+        n_ren, n_gone = len(br.get("renamed") or []), len(br.get("gone") or [])
+        if n_ren:
+            out["reasons"].append(
+                f"引用分析：{n_ren} 个引用的包名游戏里已经没有，但存在同名主干的新"
+                f"资产 —— 多半是这次更新改名/搬了目录（转换修不了，得等作者更新）")
+        if n_gone:
+            out["reasons"].append(
+                f"引用分析：{n_gone} 个引用的包名游戏里彻底没有 —— "
+                f"作者没打包进来，或者官方把它删了")
         out["verdict"] = code
         out["label"] = label
         out["why"] = why
@@ -481,6 +496,10 @@ def assess(src: str, official: RC.OfficialAssets | None = None, *,
                                         if k in KIND_NOTE)
         except Exception:
             pass
+
+    # 引用分析（可选，慢）：它引用的资产游戏里还在不在
+    if refs and h["ok"]:
+        out["refs"] = ref_report(src, official, log=emit)
 
     # 加载顺序冲突：谁用更大的 chunk 号压着我 -> 该怎么改名
     out["rename"] = rename_plan_for(src, paks_dir=paks_dir, peers=peers)
@@ -721,6 +740,44 @@ def should_fix_name(a: dict) -> bool:
     return a.get("verdict") != "unreadable"
 
 
+# ---------------------------------------------------------------------------
+# 引用分析（v1.7.0）：模组引用的资产，游戏更新后还在不在？
+# ---------------------------------------------------------------------------
+def ref_report(src: str, official, *, limit: int = 0, log=None) -> dict:
+    """调 ronrefs 做引用分析。缺模块 / 缺 oo2core 都明确降级，绝不抛异常。"""
+    name = os.path.basename(src)
+    blank = {"src": src, "name": name, "ok": False, "error": "", "entries": 0,
+             "assets": 0, "read": 0, "skipped": 0, "skipped_reason": "",
+             "refs": 0, "refs_alive": 0, "refs_own": 0, "missing": [],
+             "misplaced": [], "truncated": False, "seconds": 0.0}
+    if official is None or not getattr(official, "has_full_index", False):
+        blank["error"] = "没有官方清单，引用分析没法对账"
+        return blank
+    try:
+        import ronrefs as RR
+    except Exception as ex:
+        blank["error"] = f"引用分析模块加载失败：{type(ex).__name__}: {ex}"
+        return blank
+    try:
+        return RR.analyze_pak(src, official, limit=limit, log=log)
+    except Exception as ex:
+        blank["error"] = f"{type(ex).__name__}: {ex}"
+        return blank
+
+
+def render_refs(r: dict, log=None) -> None:
+    """打印引用分析结果（模块不在就跳过）。"""
+    emit = log or print
+    try:
+        import ronrefs as RR
+    except Exception:
+        return
+    try:
+        RR.render_report(r, log=emit)
+    except Exception as ex:
+        emit(f"   （引用分析结果打印失败：{type(ex).__name__}: {ex}）")
+
+
 def apply_rename(src: str, new_name: str, outdir: str) -> str:
     """复制一份改成新名字放进 outdir。**不动原文件**，也绝不覆盖已有文件。"""
     import shutil
@@ -757,6 +814,8 @@ def render_assess(a: dict, log=None) -> None:
                     emit(f"      → {f['hint']}")
     for r in a["reasons"]:
         emit(f"   · {r}")
+    if a.get("refs") is not None:
+        render_refs(a["refs"], log=emit)
     rn = a.get("rename") or {}
     if rn.get("needed"):
         if rn.get("readable", True):
@@ -807,6 +866,9 @@ def main() -> int:
     ap.add_argument("--assess", action="store_true",
                     help="先诊断再转换：只回答「这个模组是什么类型、能不能改、"
                          "值不值得改」，不改任何文件")
+    ap.add_argument("--refs", action="store_true",
+                    help="引用分析：读模组资产里记的包路径，查它引用的资产"
+                         "游戏更新后还在不在（较慢；压缩资产需要本机有 oo2core）")
     ap.add_argument("--fix-names", metavar="输出目录", default=None,
                     help="自动改名修复：给缺 _P 后缀的补上、给加载顺序被压的"
                          "调大 pakchunk 号，结果复制到指定目录（原文件不动）")
@@ -853,11 +915,12 @@ def main() -> int:
         return 0
 
     results = []
-    if args.assess or args.fix_names:
-        # 先诊断再转换（可选顺带改名修复）：只给结论 + 可选的改名副本
+    if args.assess or args.fix_names or args.refs:
+        # 先诊断再转换（可选顺带改名修复 / 引用分析）：只给结论 + 可选产物
         ares = []
         for src in paks:
-            a = assess(src, official, paks_dir=paks_dir, verify=args.verify)
+            a = assess(src, official, paks_dir=paks_dir, verify=args.verify,
+                       refs=args.refs)
             if args.fix_names and should_fix_name(a):
                 a["fixed_path"] = apply_rename(src, a["rename"]["new_name"],
                                                args.fix_names)
@@ -887,6 +950,8 @@ def main() -> int:
     for src in paks:
         r = check(src, official, paks_dir=paks_dir, verify=args.verify)
         render(r)
+        if args.refs and r["ok"]:
+            render_refs(ref_report(src, official), log=print)
         results.append(r)
 
     n_bad = sum(1 for r in results if not r["ok"] or r.get("errors"))

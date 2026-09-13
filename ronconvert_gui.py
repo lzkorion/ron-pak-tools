@@ -221,8 +221,8 @@ def _rename_output(path: str, new_name: str) -> str:
 def _worker(mod_dir: str, outdir: str, manifest: str | None,
             verify: bool, strip_all: bool, match_name: bool,
             strip_modified: bool, health_only: bool, repack_raw: bool,
-            assess_first: bool, fix_names: bool, game_paks: str | None,
-            q) -> None:
+            assess_first: bool, fix_names: bool, refs: bool,
+            game_paks: str | None, q) -> None:
     """在子进程中执行转换，通过 q 回传消息。
 
     消息格式: (kind, payload)
@@ -260,6 +260,8 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
         if fix_names:
             log("自动改名修复: 开启（文件名缺 _P 后缀 / 加载顺序被压着的，"
                 "顺带出一份改好名的）")
+        if refs:
+            log("引用分析  : 开启（读模组资产里记的包路径，查游戏更新后哪些引用已断）")
         log("=" * 70)
 
         # ---- 官方清单（由本机游戏生成，不随程序分发）----
@@ -360,6 +362,8 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                           "findings": [], "verdict": f"体检出错：{ex}",
                           "errors": 1, "warnings": 0}
                 RH.render(hr, log=log)
+                if refs:
+                    RH.render_refs(RH.ref_report(src, official), log=log)
                 done += 1
                 summary.append({
                     "name": hr["name"], "verdict": hr.get("verdict", ""),
@@ -373,7 +377,7 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
         else:
             # ---- 先诊断再转换：不推荐转的直接跳过，不产出文件 ----
             RH = None
-            if assess_first or fix_names:
+            if assess_first or fix_names or refs:
                 try:
                     import ronhealth as RH          # noqa: F811
                 except Exception as ex:
@@ -382,6 +386,8 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                         log(f"⚠ 无法加载诊断模块，改为全部转换：{ex}")
                     if fix_names:
                         log(f"⚠ 自动改名修复跳过（模块加载失败）：{ex}")
+                    if refs:
+                        log(f"⚠ 引用分析跳过（模块加载失败）：{ex}")
 
             fix_cache: dict[str, dict] = {}       # src -> 改名方案
 
@@ -427,7 +433,7 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                     q.put(("prog", (i - 1, total, _os.path.basename(src))))
                     try:
                         a = RH.assess(src, official, paks_dir=game_paks,
-                                      verify=False)
+                                      verify=False, refs=refs)
                     except Exception as ex:
                         a = {"name": _os.path.basename(src), "label": "读不了",
                              "why": f"{type(ex).__name__}: {ex}",
@@ -483,6 +489,13 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
                     d = RC.Diagnosis(src=src)
                     d.error = f"{type(ex).__name__}: {ex}"
                     d.problems.append("处理时发生异常")
+
+                # 引用分析（诊断模式下 assess 里已经做过，别做两遍）
+                if refs and RH is not None and not assess_first:
+                    try:
+                        RH.render_refs(RH.ref_report(src, official), log=log)
+                    except Exception as ex:
+                        log(f"   ⚠ 引用分析失败：{type(ex).__name__}: {ex}")
 
                 # 打印结论
                 log(f"   ── 结论：{d.verdict}")
@@ -683,28 +696,36 @@ class App:
                  "只转该转的"
         ).grid(row=5, column=0, sticky="w")
 
-        self.raw_var = tk.BooleanVar(value=False)
+        self.refs_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            opt, variable=self.raw_var,
-            text="改压缩方式为不压缩：用于模组压缩方式和游戏不一致导致卡加载"
-                 "（包会变大）"
-        ).grid(row=7, column=0, sticky="w")
+            opt, variable=self.refs_var,
+            text="引用分析：读模组资产里记的包路径，查游戏更新后哪些引用已断"
+                 "（较慢；压缩资产需要本机有 oo2core.dll / 装过 UE）"
+        ).grid(row=6, column=0, sticky="w")
 
         self.fixnames_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             opt, variable=self.fixnames_var,
             text="自动改名修复：补 _P 后缀 / 调 pakchunk 加载顺序，"
                  "另出一份改好名的（原文件不动）"
-        ).grid(row=6, column=0, sticky="w")
+        ).grid(row=7, column=0, sticky="w")
+
+        self.raw_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opt, variable=self.raw_var,
+            text="改压缩方式为不压缩：用于模组压缩方式和游戏不一致导致卡加载"
+                 "（包会变大）"
+        ).grid(row=8, column=0, sticky="w")
 
         self.genman_var = tk.BooleanVar(value=False)
         chk = ttk.Checkbutton(
             opt, variable=self.genman_var,
             text="先生成官方资产清单（首次使用必做；游戏更新后重新生成）")
-        chk.grid(row=8, column=0, sticky="w")
+        chk.grid(row=9, column=0, sticky="w")
         self.game_var = tk.StringVar(value="游戏目录识别中…")
         ttk.Label(opt, textvariable=self.game_var,
-                  foreground="#666").grid(row=9, column=0, sticky="w", pady=(4, 0))
+                  foreground="#666").grid(row=10, column=0, sticky="w",
+                                          pady=(4, 0))
 
         # ---- 按钮 ----
         bar = ttk.Frame(root, padding=(14, 6))
@@ -799,6 +820,8 @@ class App:
             self.assess_var.set(bool(self.cfg["assess_first"]))
         if "fix_names" in self.cfg:
             self.fixnames_var.set(bool(self.cfg["fix_names"]))
+        if "refs" in self.cfg:
+            self.refs_var.set(bool(self.cfg["refs"]))
         if autostart and last and os.path.isdir(last):
             self.root.after(400, self.start)
 
@@ -958,7 +981,8 @@ class App:
                          "health_only": bool(self.health_var.get()),
                          "repack_raw": bool(self.raw_var.get()),
                          "assess_first": bool(self.assess_var.get()),
-                         "fix_names": bool(self.fixnames_var.get())})
+                         "fix_names": bool(self.fixnames_var.get()),
+                         "refs": bool(self.refs_var.get())})
         save_config(self.cfg)
 
         self.running = True
@@ -984,7 +1008,8 @@ class App:
                       bool(self.health_var.get()),
                       bool(self.raw_var.get()),
                       bool(self.assess_var.get()),
-                      bool(self.fixnames_var.get()), game_paks, self.q),
+                      bool(self.fixnames_var.get()),
+                      bool(self.refs_var.get()), game_paks, self.q),
                 daemon=True)
             self.proc.start()
         except Exception as ex:
@@ -1186,11 +1211,12 @@ class App:
         self.root.destroy()
 
 
-def _selftest(moddir: str, verify: bool = False) -> int:
+def _selftest(moddir: str, verify: bool = False, refs: bool = False) -> int:
     """命令行自检：不建窗口，验证打包后的 exe 能跑通子进程转换流程。
 
     用法（给打包好的 exe）：
-        RoN模组转换器.exe --selftest "<模组目录>"
+        RoNPakTools.exe --selftest "<模组目录>"
+        RoNPakTools.exe --selftest "<模组目录>" --refs    # 顺带验证引用分析
     """
     ok = True
     _out("=" * 66)
@@ -1203,7 +1229,7 @@ def _selftest(moddir: str, verify: bool = False) -> int:
     _out("=" * 66)
 
     # 1) 关键模块能否导入
-    for name in ("pakfmt", "ronconvert"):
+    for name in ("pakfmt", "ronconvert", "ronrefs"):
         try:
             m = __import__(name)
             _out(f"[OK]   import {name}  ({getattr(m, '__file__', '?')})")
@@ -1233,7 +1259,7 @@ def _selftest(moddir: str, verify: bool = False) -> int:
     q = ctx.Queue()
     proc = ctx.Process(target=_worker,
                        args=(moddir, outdir, man, verify, False, False, False,
-                             False, False, False, False, None, q),
+                             False, False, False, False, refs, None, q),
                        daemon=True)
     proc.start()
 
@@ -1271,7 +1297,8 @@ def main() -> int:
     mp.freeze_support()          # PyInstaller 打包后必须
     if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
         return _selftest(os.path.abspath(sys.argv[2]),
-                         verify="--verify" in sys.argv)
+                         verify="--verify" in sys.argv,
+                         refs="--refs" in sys.argv)
     try:
         root = tk.Tk()
     except Exception as ex:

@@ -47,6 +47,16 @@ This file explains provenance, scope, and what this project deliberately does NO
 `UnrealPak` 是 Epic 的 Engine Tool。你通过合法安装 Unreal Engine 获得它，
 在本机使用属于你的许可范围。**请勿把本项目与 UnrealPak 一起打包再分发。**
 
+### 关于 oo2core.dll（可选依赖，v1.7.0 起）
+
+「引用分析」要读模组里 Oodle 压缩的资产，需要一个 Oodle 解码器。
+程序**只搜索你本机已经存在的 `oo2core*.dll`**（游戏目录 / UE 安装目录 /
+System32），**不分发、不下载、不打包**它；找不到时功能明确降级，
+只分析未压缩的资产，并如实说明原因。
+
+`oo2core.dll` 同样是 Epic 的二进制。你通过合法途径获得它，
+在本机使用属于你的许可范围。**请勿把本项目与它一起打包再分发。**
+
 ## 4. 官方资产清单由你本机生成
 
 程序判断「某个资产官方有没有」需要一份官方资产清单。
@@ -126,6 +136,17 @@ verification is skipped and core conversion still works.
 `UnrealPak` is an Epic Engine Tool. You obtained it through a legitimate Unreal
 Engine installation; using it locally is within your license.
 **Do not bundle this project with UnrealPak for redistribution.**
+
+### About oo2core.dll (optional dependency, since v1.7.0)
+
+"Reference analysis" needs an Oodle decoder to read Oodle-compressed assets inside
+mods. The program **only searches for `oo2core*.dll` already present on your
+machine** (game folder / UE install / System32). It is **never distributed,
+downloaded, or bundled**. When it is absent the feature degrades explicitly:
+only uncompressed assets are analysed, and the reason is reported.
+
+`oo2core.dll` is likewise an Epic binary. Using your own copy locally is within
+your license. **Do not bundle this project with it for redistribution.**
 
 ## 4. The official asset manifest is generated locally
 

@@ -4,7 +4,7 @@
 
 用法（token 只用于这一次，不会写进任何文件）：
     set GITHUB_TOKEN=ghp_xxxx
-    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.6.0
+    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.7.0
 
 会做：
   1. 发布前合规检查（exe 内不得含游戏数据 / Epic 工具）
@@ -97,7 +97,7 @@ game installation. It is written only on your machine and never uploaded.
 - 可选调用你本机的 UnrealPak 做 `-List` / `-Test` 复核
 - **原始模组文件不会被修改**，结果输出到 `converted` 子目录
 
-## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.6.0
+## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.7.0
 
 v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常多写一层
 `ReadyOrNot/`（挂载点里已经有了），于是和官方永远「同路径匹配不上」、
@@ -129,6 +129,47 @@ v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常
 
 已用四个真实模组端到端复核：官方 `UnrealPak -List` / `-Test` 全部 rc=0，
 孤儿 0、缺件 0、新增 0、挂载点不变。
+
+### v1.7.0 新增（引用分析：它引用的资产，游戏里还在不在？）
+
+装了没效果 / 一闪退的另一个大头是**引用断了**。RoN 模组是拿 UAssetGUI 直接改
+「游戏烤好的资产」做的，所以模组资产**内部记着它引用的包路径**。游戏一更新，
+官方经常把资产改名、搬目录、拆成好几份 —— 模组还在引用老路径，
+轻则那个资产加载不出来，重则加载时直接崩。**这个转换修不了**，以前也看不出来。
+
+现在勾界面上的「**引用分析**」（或命令行 `--refs`），程序会：
+
+1. 逐条读模组里的 `.uasset` / `.umap`（Oodle 压缩的用**你本机已有**的 `oo2core`
+   解开；没有就明确说「压缩资产读不了」，只分析未压缩的那些）
+2. 抽出每个资产自己记的包路径 + 它引用的包路径
+3. 和**你本机生成的**官方清单对账，报出两类断链：
+
+- **游戏里还有近似的名字** → 多半是这次更新改名/搬了目录，并给出**现在最可能叫什么**
+  （实测：`LACRIMAL_INST_V2` → `.../instance/lacrimal_inst_v2`、
+  `Curve_Damage_Shotgun` → `curve_damage_shotgun_590`、
+  `icn_12g_bucknew` → `icn_12g_bucknew_1024`）
+- **游戏里彻底没有这个包名** → 作者没打包进来，或者官方把它删了
+
+还会顺带指出「资产内部记的包路径和它在 pak 里的位置对不上」这种情况
+（引擎按包名找文件，对不上就永远加载不到它）。
+
+实测 8 个真实装机模组，**一共约 9 秒**扫完（最慢的单个 2.8 秒）：
+
+| 模组 | 资产 | 引用 | 断链 |
+|---|---|---|---|
+| Restoration | 14 | 79 | 4（LACRIMAL / SCLERA 那批被搬走的） |
+| Hospital（地图） | 308 | 690 | 2 |
+| HotelBarricaded（地图） | 2715 | 4816 | 103 |
+| VisceralBlud | 422 | 599 | 19 |
+| VisceralGore | 195 | 292 | 35 |
+| wound | 3 | 0 | 0（但 3 个资产位置对不上） |
+| AK74M Zenitco | 1132 | 3383 | 318 |
+| ArteryHits | 1 | 53 | 3 |
+
+只读不写：不修改任何文件，也不生成任何东西。
+
+- 顺带修了一个静默 bug：`PakIndex.payload_of()`（只读索引的读取器）以前返回
+  **被截断的错字节**，现在会按需从文件里读（大 pak 不用整个读进内存了）。
 
 ### v1.6.0 新增（自动改名修复 + 模组类型识别）
 
@@ -246,7 +287,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="发布 exe 到 GitHub Releases")
     ap.add_argument("--user", required=True)
     ap.add_argument("--repo", default="ron-pak-tools")
-    ap.add_argument("--tag", default="v1.6.0")
+    ap.add_argument("--tag", default="v1.7.0")
     ap.add_argument("--name", default=None, help="Release 标题（默认同 tag）")
     ap.add_argument("--exe", default=os.path.join("dist", EXE_NAME))
     ap.add_argument("--dry-run", action="store_true")

@@ -919,15 +919,19 @@ class PakFile:
         """
         return e.offset
 
+    def read_at(self, off: int, n: int) -> bytes:
+        """读文件的任意区间（PakFile 整个文件都在内存里，直接切片）。"""
+        return self.data[off:off + n] if off >= 0 else b""
+
     def read_entry_bytes(self, e: PakEntry) -> bytes:
         """Header + payload bytes for one entry."""
         pos = self.entry_physical_offset(e)
-        return self.data[pos:pos + e.header_size(self.version) + e.size]
+        return self.read_at(pos, e.header_size(self.version) + e.size)
 
     def payload_of(self, e: PakEntry) -> bytes:
         """Just the payload (compressed bytes when compressed)."""
         start = e.offset + e.header_size(self.version)
-        return self.data[start:start + e.size]
+        return self.read_at(start, e.size)
 
     def locate_by_path(self, rel_path: str) -> PakEntry | None:
         """Look up an entry the way the engine does."""
@@ -967,9 +971,22 @@ class PakIndex(PakFile):
 
     对外接口与 PakFile 一致（mount_point / all_paths / read_directory_index /
     encoded_entries / version / compression_methods ...），差别只有两点：
-      · self.data 只覆盖索引区（因此 payload_of / read_entry_bytes 不可用）
+      · self.data 只覆盖索引区（payload_of / read_entry_bytes 按需从文件里读）
       · 索引 SHA1 自检照做，损坏的 pak 一样会被拒绝
     """
+
+    def read_at(self, off: int, n: int) -> bytes:
+        """从文件里按需读一段 —— 索引区之外的数据（比如某条目的载荷）也读得到。
+
+        ★ 以前这里继承 PakFile 的实现（切 self.data），但 PakIndex 的 self.data
+          只有索引区，切出来是【静默截断的错字节】。20 GB 的本体 pak 不可能整个
+          读进内存，所以必须按需 seek 读。
+        """
+        if off < 0 or n <= 0:
+            return b""
+        with open(self.path, "rb") as f:
+            f.seek(off)
+            return f.read(n)
 
     def __init__(self, path: str, strict: bool = True, tail_size: int = 4096):
         self.path = path

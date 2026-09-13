@@ -43,6 +43,7 @@ Ready or Not 每次大更新，都会**把一部分热门模组的内容直接�
 | **智能判定** | 只剥「蓝图/逻辑/数据」这类会冲突的；贴图/模型/音频等**资源替换一律保留** |
 | **先诊断再转换** | 先给结论（可以转换 / 不用转换 / 不建议转换 / 转换也修不好），只转该转的 |
 | **自动改名修复** | 补 `_P` 后缀、调 pakchunk 加载顺序，出一份改好名的副本（原文件不动） |
+| **引用分析** | 读资产内部记的包路径，查出「引用的资产游戏更新后没了」并给出现在的名字 |
 | **重新打包** | 自己实现 pak v11/v12 写入器，压缩数据原样搬运，保留条目**逐字节不变** |
 | **官方校验** | 可选调用本机 UnrealPak 做 `-List` / `-Test` 复核 |
 | **图形界面** | 双击 exe 就能用，不需要命令行 |
@@ -88,6 +89,9 @@ python tools/ronhealth.py "C:\你的模组文件夹" --assess
 
 # 顺手把该改名的模组复制一份改好名的出来（原文件不动）
 python tools/ronhealth.py "C:\你的模组文件夹" --fix-names "C:\fix"
+
+# 引用分析：它引用的资产游戏里还在不在（只读）
+python tools/ronhealth.py "C:\你的模组文件夹" --refs
 ```
 
 > 清单必须是**全路径**（`readyornot/content/blueprints/...`）。
@@ -287,6 +291,43 @@ python tools/ronhealth.py "C:\你的模组文件夹" --assess
 python tools/ronhealth.py "C:\你的模组文件夹" --fix-names "C:\你的模组文件夹\fixed"
 ```
 
+### 引用分析：它引用的资产，游戏里还在不在？（v1.7.0）
+
+「装了没效果 / 一闪退」的另一个大头是**引用断了**。RoN 模组是拿 UAssetGUI 直接改
+「游戏烤好的资产」做的，所以模组资产**内部记着它引用的包路径**；游戏一更新，
+官方经常把资产改名、搬目录、拆成好几份，模组还在引用老路径 —— 轻则那个资产
+加载不出来，重则加载时直接崩。**这个转换修不了**，以前也完全看不出来。
+
+勾界面上的「**引用分析**」（命令行 `--refs`），程序会读出每个资产的引用和官方清单对账：
+
+| 结果 | 含义 | 例子（实测） |
+|---|---|---|
+| **有近似的名字** | 多半是这次更新改名/搬了目录，并给出**现在最可能叫什么** | `LACRIMAL_INST_V2` → `.../instance/lacrimal_inst_v2`；`Curve_Damage_Shotgun` → `curve_damage_shotgun_590`；`icn_12g_bucknew` → `icn_12g_bucknew_1024` |
+| **彻底没有这个包名** | 作者没打包进来，或者官方把它删了 | `T_Blood_Splash`、`M_Drip`（作者改名后没更新引用） |
+| **位置对不上** | 资产内部记的包路径和它在 pak 里的位置不一致 —— 引擎按包名找文件，对不上就永远加载不到它 | `wound` 的三个贴图 |
+
+输出长这样（真实数据，ArteryHits 弹药模组）：
+
+```
+── 引用分析：pakchunk9999-ArteryHits_P.pak
+   资产 1 个，读出 1 个
+   引用 53 个：游戏里还在 50 个，模组自己的 0 个，【已断 3 个路径】
+
+   ✘ 游戏里还有近似的名字（多半是这次更新改名/搬了目录）：3 个路径
+      /Game/Blueprints/Items/DamageCurves/Curve_Damage_Shotgun
+         游戏里最接近的是 .../blueprints/items/damagecurves/curve_damage_shotgun_590.uasset
+         引用它的资产：AmmoDataTable.uasset
+      /Game/IconTextures/Loadout/icn_12g_bucknew
+         游戏里最接近的是 .../icontextures/loadout/icn_12g_bucknew_1024.uasset
+         引用它的资产：AmmoDataTable.uasset
+```
+
+**Oodle 压缩的资产**需要一个 Oodle 解码器：程序**只找你本机已经有的
+`oo2core*.dll`**（游戏目录 / UE 安装目录 / System32），**不分发、不下载**。
+找不到时明确降级：只分析未压缩的资产，并说明原因 —— 不会给你一个假的「没问题」。
+
+实测 8 个真实装机模组，**一共约 9 秒**（最慢的单个 2.8 秒，1.1 GB 的地图模组）。
+
 ### 清单生成：现在只要几秒
 
 v1.0.0 生成清单要把每个本体 pak 整份读进内存（`pakchunk0` 有 24 GB），
@@ -351,6 +392,7 @@ ron-pak-tools/
 │   ├── pakfmt.py         ★ pak v11/v12 读写库（核心）
 │   ├── ronconvert.py     ★ 检测 + 转换逻辑
 │   ├── ronhealth.py      ★ 体检 / 诊断 / 模组类型 / 自动改名修复
+│   ├── ronrefs.py        ★ 引用分析（读资产里的包路径，对账官方清单）
 │   ├── ronverify.py      对比原版/转换后（孤儿 / 缺件 / 挂载点）
 │   ├── ronstrip.py       精确剥离（--keep / --drop）
 │   ├── roncheck.py       批量体检
@@ -390,6 +432,7 @@ and repacks the mod without the conflicting parts.
 | **Conservative stripping** | Only strips blueprint/logic/data assets that conflict. Texture/model/audio replacements are **always kept** |
 | **Diagnose before converting** | Verdict first (convert / no need / not advisable / unfixable), then it only converts what is worth converting |
 | **Rename repair** | Appends `_P`, fixes the pakchunk load order, writes a correctly named copy (originals untouched) |
+| **Reference analysis** | Reads the package paths recorded inside assets and finds references the game update broke, suggesting the current name |
 | **Path-exact matching** | "Same file name" is **not** "same asset". Only a full path match counts (see below) |
 | **Repacking** | Own pak v11/v12 writer. Compressed bytes are copied verbatim, so kept entries stay **byte-identical** |
 | **Verification** | Optionally calls your local UnrealPak for `-List` / `-Test` |
@@ -520,6 +563,33 @@ and whether converting it can help at all:
 | Audio / animation replacement | Overriding official assets is normal |
 | Purely additive content | All new paths the game never had; nothing to strip |
 
+### Reference analysis: are the assets it references still in the game? (v1.7.0)
+
+The other big cause of "installed it, nothing happens / instant crash" is a **broken
+reference**. RoN mods are made by editing the game's *cooked* assets with UAssetGUI,
+so every mod asset **carries the package paths it references**. When the game
+updates, official assets are frequently renamed, moved or split — and the mod keeps
+referencing the old path. Worst case the reference is null and loading crashes.
+**Converting cannot fix this**, and until now nothing could even show it.
+
+Tick "**引用分析**" in the GUI (CLI: `--refs`) and the tool reads every asset's
+references and checks them against the official manifest:
+
+| Result | Meaning | Real example |
+|---|---|---|
+| **A similar name still exists** | Almost certainly renamed/moved by the update — the tool names the likely current asset | `LACRIMAL_INST_V2` → `.../instance/lacrimal_inst_v2`; `Curve_Damage_Shotgun` → `curve_damage_shotgun_590`; `icn_12g_bucknew` → `icn_12g_bucknew_1024` |
+| **The package name is gone entirely** | The author never packed it, or the game removed it | `T_Blood_Splash`, `M_Drip` |
+| **Location mismatch** | The asset's own recorded package path disagrees with where it sits in the pak — the engine looks files up *by package name*, so it will never be found | the three `wound` textures |
+
+**Oodle-compressed assets** need an Oodle decoder: the tool **only looks for an
+`oo2core*.dll` already on your machine** (game folder / UE install / System32) and
+**never distributes or downloads it**. If it is missing, the feature degrades
+loudly — uncompressed assets only, with the reason stated — instead of pretending
+everything is fine.
+
+Measured on 8 real installed mods: **about 9 seconds total** (slowest single mod
+2.8 s, including a 1.1 GB map mod). It is read-only: nothing is modified or written.
+
 ### Manifest generation is now fast
 
 v1.0.0 read each base-game pak fully into memory (`pakchunk0` is 24 GB), which was
@@ -546,6 +616,9 @@ python tools/ronhealth.py "C:\your\mod\folder" --assess
 
 # Copy the ones that need it under a corrected name (originals untouched)
 python tools/ronhealth.py "C:\your\mod\folder" --fix-names "C:\fix"
+
+# Reference analysis: are the assets it references still in the game? (read-only)
+python tools/ronhealth.py "C:\your\mod\folder" --refs
 ```
 
 GUI: double-click `RoNPakTools.exe`, generate the official asset manifest once
