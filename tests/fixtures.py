@@ -29,6 +29,19 @@ import ronconvert as RC
 
 MOUNT = "../../../ReadyOrNot/Content/"
 
+# UE 包魔数（FPackageFileSummary 开头 0x9E2A83C1）。
+# 真实的 .uasset/.umap 都以它开头，合成数据也照做 ——
+# 否则「体检」的包格式抽样会把正常模组误判成坏包。
+PKG_MAGIC = b"\xc1\x83\x2a\x9e"
+
+
+def _asset_blob(rel: str, filler: bytes) -> bytes:
+    """.uasset / .umap 前面补上 UE 魔数，其它文件原样。"""
+    if rel.lower().endswith((".uasset", ".umap")):
+        return PKG_MAGIC + filler
+    return filler
+
+
 # 冲突型（应剥离）
 CONFLICT_ASSETS = [
     "Blueprints/Items/WeaponsRevised/BP_SampleGun.uasset",
@@ -68,11 +81,11 @@ def default_files() -> dict[str, bytes]:
     """一份典型的模组内容：冲突型 + 资源替换型 + 独有内容。"""
     out = {}
     for i, rel in enumerate(CONFLICT_ASSETS):
-        out[rel] = f"synthetic-conflict-{i}-".encode() * 20
+        out[rel] = _asset_blob(rel, f"synthetic-conflict-{i}-".encode() * 20)
     for i, rel in enumerate(KEEP_ASSETS):
-        out[rel] = f"synthetic-texture-{i}-".encode() * 40
+        out[rel] = _asset_blob(rel, f"synthetic-texture-{i}-".encode() * 40)
     for i, rel in enumerate(UNIQUE_ASSETS):
-        out[rel] = f"synthetic-unique-{i}-".encode() * 15
+        out[rel] = _asset_blob(rel, f"synthetic-unique-{i}-".encode() * 15)
     return out
 
 

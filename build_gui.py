@@ -25,6 +25,7 @@ ENTRY = "ronconvert_gui.py"
 DATAS = [
     (os.path.join("tools", "pakfmt.py"), "."),
     (os.path.join("tools", "ronconvert.py"), "."),
+    (os.path.join("tools", "ronhealth.py"), "."),
 ]
 # 明确禁止被打包进发行物的东西（构建时校验，防止误打包）
 FORBIDDEN = [
@@ -37,8 +38,8 @@ FORBIDDEN = [
 VERSION_INFO = """
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 1, 0, 0),
-    prodvers=(1, 1, 0, 0),
+    filevers=(1, 2, 0, 0),
+    prodvers=(1, 2, 0, 0),
     mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0,
     date=(0, 0)
   ),
@@ -47,12 +48,12 @@ VSVersionInfo(
       StringTable('080404B0', [
         StringStruct('CompanyName', ''),
         StringStruct('FileDescription', 'RoN Pak Tools'),
-        StringStruct('FileVersion', '1.1.0.0'),
+        StringStruct('FileVersion', '1.2.0.0'),
         StringStruct('InternalName', 'ronconvert_gui'),
         StringStruct('LegalCopyright', ''),
         StringStruct('OriginalFilename', 'RoNPakTools.exe'),
         StringStruct('ProductName', 'RoN Pak Tools'),
-        StringStruct('ProductVersion', '1.1.0.0')
+        StringStruct('ProductVersion', '1.2.0.0')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])

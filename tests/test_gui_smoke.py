@@ -47,6 +47,9 @@ def main():
     check(app.strip_all_var.get() is False, "默认非激进模式")
     check(app.match_name_var.get() is False,
           "默认关闭「同名也剥」（同名≠同路径，开着有误剥风险）")
+    check(app.strip_modified_var.get() is False,
+          "默认关闭「连改过的也剥」（开着会让模组变成能进游戏但什么都不发生）")
+    check(app.health_var.get() is False, "默认非体检模式")
 
     print("\n2) 日志消息各分支")
     app._handle("log", "普通一行")
@@ -115,7 +118,8 @@ def main():
     print("\n6) 配置记忆")
     no_cfg = bool(os.environ.get("RONPAK_NO_CONFIG"))
     G.save_config({"last_dir": WORK, "verify": False, "strip_all": True,
-                   "match_name": True})
+                   "match_name": True, "strip_modified": True,
+                   "health_only": True})
     if no_cfg:
         # 测试环境禁用了写配置（避免污染工作目录），此时只验证读取不崩
         check(not os.path.isfile(cfg_path),
@@ -130,6 +134,8 @@ def main():
         check(app2.verify_var.get() is False, "恢复 verify 选项")
         check(app2.strip_all_var.get() is True, "恢复 strip_all 选项")
         check(app2.match_name_var.get() is True, "恢复 match_name 选项")
+        check(app2.strip_modified_var.get() is True, "恢复 strip_modified 选项")
+        check(app2.health_var.get() is True, "恢复 health_only 选项")
         r2.destroy()
 
     # 损坏的配置不能崩

@@ -206,7 +206,8 @@ def save_config(cfg: dict) -> None:
 # ---------------------------------------------------------------------------
 def _worker(mod_dir: str, outdir: str, manifest: str | None,
             verify: bool, strip_all: bool, match_name: bool,
-            strip_modified: bool, game_paks: str | None, q) -> None:
+            strip_modified: bool, health_only: bool,
+            game_paks: str | None, q) -> None:
     """在子进程中执行转换，通过 q 回传消息。
 
     消息格式: (kind, payload)
@@ -269,12 +270,16 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
         log(f"官方资产清单：{official.source}")
         log(f"   全路径条目 {len(official.full)} 条，文件名条目 {len(official.bare)} 条")
         if len(official) == 0:
-            q.put(("fatal",
-                   "还没有官方资产清单，无法判断哪些内容官方已有。\n\n"
-                   "请勾选「先生成官方资产清单」后重试（需要游戏已安装）。\n"
-                   "清单在本机生成、只存在你自己电脑上，不含任何游戏资产文件。"))
-            return
-        if not official.has_full_index and not match_name:
+            if health_only:
+                log("   ⚠ 没有官方清单：体检照做（挂载点/文件名/成组/加载顺序/"
+                    "包格式），但会跳过「路径对不对得上官方」那一项。")
+            else:
+                q.put(("fatal",
+                       "还没有官方资产清单，无法判断哪些内容官方已有。\n\n"
+                       "请勾选「先生成官方资产清单」后重试（需要游戏已安装）。\n"
+                       "清单在本机生成、只存在你自己电脑上，不含任何游戏资产文件。"))
+                return
+        if not official.has_full_index and not match_name and not health_only:
             # ★ 旧的裸名清单 + 默认策略 = 一条都不会剥（工具空转）。
             #   必须说清楚，否则用户会以为「转换过了」却什么都没发生。
             q.put(("fatal",
@@ -308,54 +313,88 @@ def _worker(mod_dir: str, outdir: str, manifest: str | None,
         summary: list[dict] = []
         t_all = time.time()
 
-        for i, src in enumerate(paks, 1):
-            q.put(("prog", (i - 1, total, _os.path.basename(src))))
+        if health_only:
+            # ---- 体检模式：只诊断「为什么没效果」，不写任何文件 ----
             try:
-                d = RC.diagnose(src, official, strip_all=strip_all,
-                                match_name=match_name,
-                                strip_modified=strip_modified, log=log)
-                if d.ok:
-                    RC.convert(d, outdir, verify=verify, log=log)
+                import ronhealth as RH
             except Exception as ex:
-                # 单个 pak 出错不应中断整批
-                log(f"   ✘ 处理出错：{type(ex).__name__}: {ex}")
-                log(traceback.format_exc(limit=3))
-                d = RC.Diagnosis(src=src)
-                d.error = f"{type(ex).__name__}: {ex}"
-                d.problems.append("处理时发生异常")
+                q.put(("fatal", f"无法加载体检模块 ronhealth：{type(ex).__name__}: {ex}"))
+                return
+            log("体检模式：只诊断，不生成任何文件")
+            log("")
+            peers = RH.scan_peer_paks(game_paks, "") if game_paks else []
+            if peers:
+                log(f"已读入 {len(peers)} 个同目录模组，用来查加载顺序冲突")
+                log("")
+            for i, src in enumerate(paks, 1):
+                q.put(("prog", (i - 1, total, _os.path.basename(src))))
+                try:
+                    hr = RH.check(src, official, peers=peers, verify=verify)
+                except Exception as ex:
+                    log(f"   ✘ 体检出错：{type(ex).__name__}: {ex}")
+                    hr = {"name": _os.path.basename(src), "ok": False,
+                          "findings": [], "verdict": f"体检出错：{ex}",
+                          "errors": 1, "warnings": 0}
+                RH.render(hr, log=log)
+                done += 1
+                summary.append({
+                    "name": hr["name"], "verdict": hr.get("verdict", ""),
+                    "action": "", "out": "", "dropped": 0, "kept": 0,
+                    "ok": hr.get("ok", False),
+                    "problems": [f["title"] for f in hr.get("findings", [])
+                                 if f["level"] == RH.LEVEL_ERROR],
+                })
+                q.put(("result", summary[-1]))
+                q.put(("prog", (done, total, _os.path.basename(src))))
+        else:
+            for i, src in enumerate(paks, 1):
+                q.put(("prog", (i - 1, total, _os.path.basename(src))))
+                try:
+                    d = RC.diagnose(src, official, strip_all=strip_all,
+                                    match_name=match_name,
+                                    strip_modified=strip_modified, log=log)
+                    if d.ok:
+                        RC.convert(d, outdir, verify=verify, log=log)
+                except Exception as ex:
+                    # 单个 pak 出错不应中断整批
+                    log(f"   ✘ 处理出错：{type(ex).__name__}: {ex}")
+                    log(traceback.format_exc(limit=3))
+                    d = RC.Diagnosis(src=src)
+                    d.error = f"{type(ex).__name__}: {ex}"
+                    d.problems.append("处理时发生异常")
 
-            # 打印结论
-            log(f"   ── 结论：{d.verdict}")
-            for a in d.actions:
-                log(f"      · {a}")
-            for p in d.problems:
-                log(f"      ⚠ {p}")
-            if d.dropped:
-                show = sorted(d._drop)
-                for p in show[:5]:
-                    log(f"      剥离 {p}")
-                if len(show) > 5:
-                    log(f"      ... 其余 {len(show)-5} 个冲突条目")
-            if d.verify:
-                v = d.verify
-                if v.get("ok"):
-                    log(f"      ✔ 官方复核：-List {v['listed']} 条 / -Test 通过")
-                elif v.get("ok") is False:
-                    log(f"      ✘ 官方复核失败：{v}")
-                else:
-                    log(f"      ⚠ 未能复核：{v.get('reason', v)}")
-            if d.out_path:
-                log(f"      输出 {d.out_path}（{d.out_bytes:,} 字节）")
+                # 打印结论
+                log(f"   ── 结论：{d.verdict}")
+                for a in d.actions:
+                    log(f"      · {a}")
+                for p in d.problems:
+                    log(f"      ⚠ {p}")
+                if d.dropped:
+                    show = sorted(d._drop)
+                    for p in show[:5]:
+                        log(f"      剥离 {p}")
+                    if len(show) > 5:
+                        log(f"      ... 其余 {len(show)-5} 个冲突条目")
+                if d.verify:
+                    v = d.verify
+                    if v.get("ok"):
+                        log(f"      ✔ 官方复核：-List {v['listed']} 条 / -Test 通过")
+                    elif v.get("ok") is False:
+                        log(f"      ✘ 官方复核失败：{v}")
+                    else:
+                        log(f"      ⚠ 未能复核：{v.get('reason', v)}")
+                if d.out_path:
+                    log(f"      输出 {d.out_path}（{d.out_bytes:,} 字节）")
 
-            done += 1
-            summary.append({
-                "name": _os.path.basename(src), "verdict": d.verdict,
-                "action": d.action, "out": d.out_path,
-                "dropped": d.dropped, "kept": d.kept,
-                "ok": d.ok, "problems": list(d.problems),
-            })
-            q.put(("result", summary[-1]))
-            q.put(("prog", (done, total, _os.path.basename(src))))
+                done += 1
+                summary.append({
+                    "name": _os.path.basename(src), "verdict": d.verdict,
+                    "action": d.action, "out": d.out_path,
+                    "dropped": d.dropped, "kept": d.kept,
+                    "ok": d.ok, "problems": list(d.problems),
+                })
+                q.put(("result", summary[-1]))
+                q.put(("prog", (done, total, _os.path.basename(src))))
 
         # ---- 汇总 ----
         buckets: dict[str, int] = {}
@@ -483,14 +522,20 @@ class App:
                  "只在游戏一进就崩时才勾）"
         ).grid(row=3, column=0, sticky="w")
 
+        self.health_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opt, variable=self.health_var,
+            text="体检模式：只诊断「为什么这个模组装了没效果」，不生成任何文件"
+        ).grid(row=4, column=0, sticky="w")
+
         self.genman_var = tk.BooleanVar(value=False)
         chk = ttk.Checkbutton(
             opt, variable=self.genman_var,
             text="先生成官方资产清单（首次使用必做；游戏更新后重新生成）")
-        chk.grid(row=4, column=0, sticky="w")
+        chk.grid(row=5, column=0, sticky="w")
         self.game_var = tk.StringVar(value="游戏目录识别中…")
         ttk.Label(opt, textvariable=self.game_var,
-                  foreground="#666").grid(row=5, column=0, sticky="w", pady=(4, 0))
+                  foreground="#666").grid(row=6, column=0, sticky="w", pady=(4, 0))
 
         # ---- 按钮 ----
         bar = ttk.Frame(root, padding=(14, 6))
@@ -565,6 +610,8 @@ class App:
             self.match_name_var.set(bool(self.cfg["match_name"]))
         if "strip_modified" in self.cfg:
             self.strip_modified_var.set(bool(self.cfg["strip_modified"]))
+        if "health_only" in self.cfg:
+            self.health_var.set(bool(self.cfg["health_only"]))
         if autostart and last and os.path.isdir(last):
             self.root.after(400, self.start)
 
@@ -720,11 +767,13 @@ class App:
         self.cfg.update({"last_dir": d, "verify": bool(self.verify_var.get()),
                          "strip_all": bool(self.strip_all_var.get()),
                          "match_name": bool(self.match_name_var.get()),
-                         "strip_modified": bool(self.strip_modified_var.get())})
+                         "strip_modified": bool(self.strip_modified_var.get()),
+                         "health_only": bool(self.health_var.get())})
         save_config(self.cfg)
 
         self.running = True
         self.total = 0
+        self._health_mode = bool(self.health_var.get())
         self.pb.configure(value=0, maximum=100)
         self.btn_start.configure(state="disabled")
         self.btn_pick.configure(state="disabled")
@@ -741,7 +790,8 @@ class App:
                 args=(d, self.outdir, manifest, bool(self.verify_var.get()),
                       bool(self.strip_all_var.get()),
                       bool(self.match_name_var.get()),
-                      bool(self.strip_modified_var.get()), game_paks, self.q),
+                      bool(self.strip_modified_var.get()),
+                      bool(self.health_var.get()), game_paks, self.q),
                 daemon=True)
             self.proc.start()
         except Exception as ex:
@@ -830,6 +880,16 @@ class App:
 
         self.outdir = info.get("outdir") or self.outdir
         good = sum(v for k, v in b.items() if k != "无法处理")
+        if getattr(self, "_health_mode", False):
+            n_err = sum(1 for s in info.get("summary", []) if s.get("problems"))
+            msg = (f"体检完成。\n\n"
+                   f"共检查 {info.get('total', 0)} 个 pak，"
+                   f"{n_err} 个发现问题。\n\n"
+                   f"详细结论在日志里（✘ 开头的就是问题所在）。\n"
+                   f"没有修改、也没有生成任何文件。")
+            self._finish(ok=True, msg=None)
+            messagebox.showinfo(APP_TITLE, msg)
+            return
         msg = (f"转换完成。\n\n"
                f"共 {info.get('total', 0)} 个 pak，成功处理 {good} 个。\n"
                f"输出目录：\n{self.outdir}\n\n"
@@ -962,7 +1022,7 @@ def _selftest(moddir: str, verify: bool = False) -> int:
     q = ctx.Queue()
     proc = ctx.Process(target=_worker,
                        args=(moddir, outdir, man, verify, False, False, False,
-                             None, q),
+                             False, None, q),
                        daemon=True)
     proc.start()
 
