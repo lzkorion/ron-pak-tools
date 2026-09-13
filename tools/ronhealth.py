@@ -77,6 +77,25 @@ def mount_root(mount: str) -> str:
     return m.strip("/").lower()
 
 
+def game_compression_methods(paks_dir: str) -> list[str]:
+    """游戏本体 pak 用的压缩方式（看第一个能读的本体 pak 就行）。
+
+    模组必须用游戏支持的压缩方式 —— 用了游戏没编进去的解码器，
+    读它的资产会失败，表现就是卡加载。
+    """
+    if not paks_dir or not os.path.isdir(paks_dir):
+        return []
+    for name in sorted(os.listdir(paks_dir)):
+        if not RC.is_official_pak(name):
+            continue
+        try:
+            pk = P.read_pak_index(os.path.join(paks_dir, name))
+            return [m for m in pk.compression_methods if m]
+        except Exception:
+            continue
+    return []
+
+
 def scan_peer_paks(paks_dir: str, skip: str) -> list[dict]:
     """扫已装的其他【模组】pak，拿到它们的路径集合和 chunk 号。
 
@@ -276,6 +295,22 @@ def check(src: str, official: RC.OfficialAssets | None = None, *,
     if not orphans and not missing:
         add(LEVEL_OK, f"资产成组完整（{len(groups)} 个资产，无孤儿/缺件）")
 
+    # ---------- 5b. 压缩方式必须和游戏一致 ----------
+    mine_methods = [m for m in pk.compression_methods if m]
+    r["methods"] = mine_methods
+    game_methods = game_compression_methods(paks_dir) if paks_dir else []
+    if mine_methods and game_methods:
+        if set(mine_methods) - set(game_methods):
+            add(LEVEL_ERROR,
+                f"压缩方式 {mine_methods} 和游戏本体 {game_methods} 不一致",
+                f"游戏本体用的是 {game_methods}，这个包用的是 {mine_methods}",
+                "游戏如果没把对应的解码器编进去，读这个包的资产就会失败 —— "
+                "表现就是卡在加载页面。用能输出 "
+                f"{'/'.join(game_methods)} 的工具重新打包"
+                "（社区打包脚本用的是 -compressionformats=Oodle）")
+        else:
+            add(LEVEL_OK, f"压缩方式 {mine_methods} 和游戏本体一致")
+
     # ---------- 6. 抽样看包格式（.uasset 头部魔数） ----------
     # 只读索引的话拿不到数据区，所以直接按偏移 seek 读 4 个字节 —— 不用把
     # 整个 pak（可能上 GB）读进内存。压缩条目没法直接看，跳过。
@@ -284,13 +319,7 @@ def check(src: str, official: RC.OfficialAssets | None = None, *,
     for dname, files in idx.items():
         for fname, loc in files.items():
             loc2rel[loc] = (dname + fname).lstrip("/")
-    loc2e: dict[int, object] = {}
-    q = 0
-    for pe in pk.encoded_entries:
-        loc2e[q] = pe
-        q += len(P.encode_entry_index(pe))
-    for i, pe in enumerate(pk.non_encodable):
-        loc2e[-i - 1] = pe
+    loc2e = pk.location_map()
 
     sampled = bad_magic = 0
     bad_samples: list[str] = []

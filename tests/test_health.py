@@ -139,6 +139,22 @@ def main():
     check(r11["ok"], "能读")
     check(r11["errors"] == 0, f"无 error（{r11['errors']}）", titles(r11))
 
+    print("\n11) 压缩方式必须和游戏本体一致")
+    gdir = os.path.join(WORK, "gamepaks")
+    os.makedirs(gdir, exist_ok=True)
+    FX.make_pak(os.path.join(gdir, "pakchunk1-Windows.pak"))
+    check(RH.game_compression_methods(gdir) == ["Oodle"],
+          f"读本体压缩方式：{RH.game_compression_methods(gdir)}")
+    r12 = RH.check(good, off, paks_dir=gdir, peers=[])
+    check(find(r12, "压缩方式", RH.LEVEL_OK) is not None,
+          "Oodle 一致 -> 通过", titles(r12))
+    # 一个用 Zlib 的模组（Hospital 地图模组就是这样，游戏是 Oodle）
+    zlib_pak = FX.make_pak(os.path.join(WORK, "pakchunk99-Mods_Zlib_P.pak"),
+                           methods=["Zlib", "", "", "", ""])
+    r13 = RH.check(zlib_pak, off, paks_dir=gdir, peers=[])
+    check(find(r13, "压缩方式", RH.LEVEL_ERROR) is not None,
+          "Zlib 不一致 -> 报错", titles(r13))
+
     print(f"\n=== 体检功能测试 {'PASS' if not fails else 'FAIL ' + str(fails)} ===")
     return 0 if not fails else 1
 

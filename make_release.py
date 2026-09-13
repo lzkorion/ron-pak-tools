@@ -4,7 +4,7 @@
 
 用法（token 只用于这一次，不会写进任何文件）：
     set GITHUB_TOKEN=ghp_xxxx
-    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.2.0
+    python make_release.py --user lzkorion --repo ron-pak-tools --tag v1.3.0
 
 会做：
   1. 发布前合规检查（exe 内不得含游戏数据 / Epic 工具）
@@ -97,7 +97,7 @@ game installation. It is written only on your machine and never uploaded.
 - 可选调用你本机的 UnrealPak 做 `-List` / `-Test` 复核
 - **原始模组文件不会被修改**，结果输出到 `converted` 子目录
 
-## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.2.0
+## ⚠️ v1.0.0 有严重 bug，请务必升级到 v1.3.0
 
 v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常多写一层
 `ReadyOrNot/`（挂载点里已经有了），于是和官方永远「同路径匹配不上」、
@@ -130,9 +130,19 @@ v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常
 已用四个真实模组端到端复核：官方 `UnrealPak -List` / `-Test` 全部 rc=0，
 孤儿 0、缺件 0、新增 0、挂载点不变。
 
-### v1.2.0 新增：体检模式
+### v1.3.0 新增（体检模式 + 两个硬 bug 修复）
 
-- **只诊断、不改文件**，直接回答「为什么这个模组装了没效果？」
+- **修：路径恢复不再依赖「重新编码推算偏移」。** 目录索引里的 location 是
+  「在 encoded 区里的字节偏移」，以前是拿我们自己的编码器重编一遍、累加长度
+  去凑的。**打包方用的编码宽度和我们不一样时，累计偏移会整体漂移**，
+  FDI 里的 location 大面积对不上 —— 实测 Hospital 地图模组 730 条只能恢复 117 条，
+  重新打包会**静默丢掉 613 条**。现在改用解析时记下的真实偏移，同一文件 **730/730** 全中。
+- **加保险**：万一还是没恢复全，`convert()` 会**拒绝重新打包、改为原样复制**
+  并明确报告，而不是写出一个看着正常、实际少了内容的包。
+- **体检新增「压缩方式」检查**：模组的压缩方式必须和游戏本体一致
+  （本体是 `Oodle`；用了游戏没编解码器的方式 → 读资产失败 → 卡加载）。
+
+- **体检模式**：只诊断、不改文件，直接回答「为什么这个模组装了没效果？」
   按[官方模组指南](https://unofficial-modding-guide.com/posts/thebasics/)的
   调试清单逐条查：
   - 文件名是不是 `_P.pak` 结尾（指南点名的常见错误）
@@ -160,9 +170,9 @@ v1.0.0 用**文件名**判定「官方已有」，而真实模组的路径里常
   但请预期模组会变成「能进游戏但什么都不发生」。
 - 清单里没有大小信息时**保守地一个都不剥**，并提示重新生成清单（几秒）。
 
-实测四个真实模组，v1.2.0 默认下**原样输出**（逐字节等于原文件）：
+实测四个真实模组，v1.3.0 默认下**原样输出**（逐字节等于原文件）：
 
-| 模组 | 条目 | 之前会剥 | v1.2.0 默认 |
+| 模组 | 条目 | 之前会剥 | v1.3.0 默认 |
 |---|---|---|---|
 | Restoration | 39 | 8 | **0** |
 | VisceralBlud | 1125 | 4 | **0** |
@@ -215,7 +225,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="发布 exe 到 GitHub Releases")
     ap.add_argument("--user", required=True)
     ap.add_argument("--repo", default="ron-pak-tools")
-    ap.add_argument("--tag", default="v1.2.0")
+    ap.add_argument("--tag", default="v1.3.0")
     ap.add_argument("--name", default=None, help="Release 标题（默认同 tag）")
     ap.add_argument("--exe", default=os.path.join("dist", EXE_NAME))
     ap.add_argument("--dry-run", action="store_true")

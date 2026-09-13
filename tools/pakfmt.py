@@ -763,10 +763,44 @@ class PakFile:
         self.index_parsed_end = p
 
         self.encoded_entries = []
+        self.encoded_offsets: list[int] = []      # 每条在 encoded 区里的【真实】起始偏移
         q = 0
         while q < len(self.encoded):
+            self.encoded_offsets.append(q)
             e, q = decode_entry_index(self.encoded, q, self.version)
             self.encoded_entries.append(e)
+
+    def location_map(self) -> dict[int, "PakEntry"]:
+        """FPakEntryLocation -> 条目。
+
+        ★ 必须用【解析时记下来的真实偏移】，不能拿 encode_entry_index 重新编码
+          去凑长度。打包方的编码宽度可能和我们的编码器不一样（比如偏移/大小
+          一律用 64 位），重新编码会让累积偏移整体漂移，FDI 里的 location 就
+          大面积对不上 —— 路径恢复不出来，重新打包时会把条目整片丢掉。
+
+          实测 Hospital 地图模组：真实偏移 730/730 全中，重新编码只有 117/730。
+
+        编码条目的 location 是「在 encoded 区里的字节偏移」；
+        非编码条目是 -(下标+1)。
+        """
+        out: dict[int, PakEntry] = {}
+        for off, e in zip(self.encoded_offsets, self.encoded_entries):
+            out[off] = e
+        for i, e in enumerate(self.non_encodable):
+            out[-i - 1] = e
+        return out
+
+    def paths_with_entries(self) -> dict[str, "PakEntry"]:
+        """{挂载内相对路径: 条目} —— 按 FDI/PHI 把路径和条目接起来。"""
+        idx = self.read_directory_index("fdi") or self.read_directory_index("phi")
+        loc2e = self.location_map()
+        out: dict[str, PakEntry] = {}
+        for dname, files in idx.items():
+            for fname, loc in files.items():
+                e = loc2e.get(loc)
+                if e is not None:
+                    out[(dname + fname).lstrip("/")] = e
+        return out
 
     def read_path_hash_index(self) -> list[tuple[int, int]]:
         """FPathHashIndex: int32 count + (u64 hash, i32 location) pairs."""
@@ -836,13 +870,7 @@ class PakFile:
         idx = self.read_directory_index("fdi")
         if not idx:
             idx = self.read_directory_index("phi")
-        loc2entry: dict[int, PakEntry] = {}
-        q = 0
-        for e in self.encoded_entries:
-            loc2entry[q] = e
-            q += len(encode_entry_index(e))
-        for i, e in enumerate(self.non_encodable):
-            loc2entry[-i - 1] = e
+        loc2entry = self.location_map()
         out = []
         for dname, files in idx.items():
             for fname, loc in files.items():

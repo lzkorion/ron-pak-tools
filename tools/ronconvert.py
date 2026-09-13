@@ -696,17 +696,9 @@ def read_mod(path: str) -> tuple[P.PakFile, dict[str, P.PakEntry]]:
     idx = pk.read_directory_index("fdi") or pk.read_directory_index("phi")
     if not idx:
         raise P.PakError("pak 里没有目录索引，无法恢复路径")
-    loc_to_path: dict[int, str] = {}
-    for dname, files in idx.items():
-        for fname, loc in files.items():
-            loc_to_path[loc] = (dname + fname).lstrip("/")
-    entries: dict[str, P.PakEntry] = {}
-    q = 0
-    for e in pk.encoded_entries:
-        rel = loc_to_path.get(q)
-        q += len(P.encode_entry_index(e))
-        if rel:
-            entries[rel] = e
+    entries = pk.paths_with_entries()
+    if not entries:
+        raise P.PakError("pak 里没有目录索引，无法恢复路径")
     return pk, entries
 
 
@@ -967,6 +959,24 @@ def convert(d: Diagnosis, outdir: str, *, verify: bool = False,
         emit("   剥离后无剩余内容，不生成新 pak。")
         d.actions.append("不生成新 pak（内容已被官方完全取代，原模组可直接删除）")
         d.copied = False
+        return d
+
+    # ★ 路径没恢复全就绝不能重新打包。
+    #   我们只能写回「看得见」的条目，看不见的那些会被静默丢掉 ——
+    #   包看起来正常、自检也过，但模组其实被削掉了一大半。
+    #   这种情况原样复制，并明确报告。
+    if d.recovered < d.total_entries and d._drop:
+        emit(f"   ✘ 只恢复了 {d.recovered}/{d.total_entries} 条路径，"
+             f"重新打包会丢掉其余 {(d.total_entries - d.recovered)} 条。")
+        emit("      已改为【原样复制】，不做任何修改。请把这个 pak 反馈给作者/工具方。")
+        d.problems.append(
+            f"目录索引里有 {d.total_entries - d.recovered} 条路径没解析出来，"
+            f"为避免丢文件，本次不修改、原样复制")
+        d.actions.append("原样复制（路径没解析全，不敢重新打包）")
+        shutil.copy2(d.src, out)
+        d.out_path = out
+        d.out_bytes = os.path.getsize(out)
+        d.copied = True
         return d
 
     if d.dropped == 0 and tv == d.version:

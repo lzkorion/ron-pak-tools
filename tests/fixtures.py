@@ -63,11 +63,12 @@ UNIQUE_ASSETS = [
 
 
 def make_pak(path: str, files: dict[str, bytes] | None = None,
-             mount: str = MOUNT) -> str:
+             mount: str = MOUNT,
+             methods: list[str] | None = None) -> str:
     """写一个未压缩的合法 pak v11。"""
     if files is None:
         files = default_files()
-    w = P.PakWriter(mount, methods=["Oodle", "", "", "", ""])
+    w = P.PakWriter(mount, methods=methods or ["Oodle", "", "", "", ""])
     for rel, blob in files.items():
         w.add(rel, P.PakEntry(size=len(blob), uncompressed_size=len(blob),
                               method_index=0,
