@@ -5,11 +5,21 @@
 **Ready or Not 模组 `.pak` 诊断与转换工具**
 Detect and repair Ready or Not mods that broke after a game update.
 
-[中文](#中文) · [English](#english) · **[下载 exe](https://github.com/lzkorion/ron-pak-tools/releases/latest)** · [NOTICE.md](NOTICE.md) · [LICENSE](LICENSE) (MIT)
+[中文](#中文) · [English](#english) · **[下载 exe](https://github.com/lzkorion/ron-pak-tools/releases/latest)** · **[⚠️ 局限性](LIMITATIONS.md)** · [NOTICE.md](NOTICE.md) · [LICENSE](LICENSE) (MIT)
 
 > ⚠️ **非官方第三方工具**，与 VOID Interactive / Epic Games **无任何关联**，未获其授权或背书。
 > 本项目**不含**任何游戏资产、游戏数据清单或 Epic 工具。
 > "Ready or Not" 为 VOID Interactive 商标；"Unreal" 为 Epic Games 商标。
+
+> 🚫 **先说清楚它做不到什么**（详见 **[LIMITATIONS.md](LIMITATIONS.md)**）：
+> 它只擅长告诉你**问题在哪**，不擅长把问题**修好**。
+> 能修的只有三类 —— 文件名不对、加载顺序被压着、游戏更新后和官方同路径冲突。
+> **自定义地图闪退（要作者重烤）、作者漏打包素材（缺父材质/贴图）、老模组引用断链，
+> 这些它都修不了，只能等模组作者。** 实测 9 个装机模组，0 个「可以改」。
+>
+> It tells you **where** the problem is; it does not usually **fix** it.
+> Maps that need re-cooking, assets the author never shipped, and mods built against
+> an old game version are all beyond it — **wait for the author.**
 
 ![主界面](docs/screenshots/01-main.png)
 
@@ -34,6 +44,18 @@ Ready or Not 每次大更新，都会**把一部分热门模组的内容直接�
 
 这个工具就是干这个的：扫一遍你的模组文件夹，判断哪些内容官方已经有了，
 把会冲突的部分剥掉重新打包。
+
+### ⚠️ 做不到什么（先看这个）
+
+| 你的问题 | 工具能做到 | 最后还是要 |
+|---|---|---|
+| 文件名不对 / 加载顺序被别的模组压着 / 和官方同路径冲突 | **能修**（改名、剥掉重打包） | —— |
+| 自定义地图闪退、卡加载 | 只能告诉你「要作者重新烤」 | **等作者** |
+| 作者漏打包素材（血变成灰色贴图、材质丢失） | 只能列出「缺了哪几个」 | **等作者 / 找前置包** |
+| 老模组引用断链、蓝图和新版游戏不兼容 | 只能说「别装」 | **等作者** |
+| 改模组内部（数值、蓝图逻辑、资源引用） | **做不到** | 自己学 UAssetGUI / UE |
+
+**知道在哪 ≠ 能修。** 完整说明（含实测数据、三次真实故障）：**[LIMITATIONS.md](LIMITATIONS.md)**
 
 ### 功能
 
@@ -491,6 +513,14 @@ ron-pak-tools/
 
 ## English
 
+> 🚫 **Read what it cannot do first** — see **[LIMITATIONS.md](LIMITATIONS.md)**:
+> it tells you **where** a problem is, it does not usually **fix** it.
+> Only three things are fixable: a wrong file name, a load order another mod
+> outranks, and same-path conflicts after a game update.
+> **Custom maps that need re-cooking, assets the author never shipped, and mods
+> built against an old game version are all beyond it — wait for the author.**
+> Measured on 9 installed mods: **0** were "worth changing".
+
 ### What this is
 
 ![Main window](docs/screenshots/01-main.png)
@@ -504,6 +534,19 @@ The fix is to **strip the parts the game already ships** and keep only what is u
 
 This tool scans your mod folder, decides which content the game already provides,
 and repacks the mod without the conflicting parts.
+
+### ⚠️ What it cannot do (read this first)
+
+| Your problem | The tool | Ultimately |
+|---|---|---|
+| Wrong file name / a load order another mod outranks / same-path conflict after an update | **Fixable** (rename, strip + repack) | — |
+| A custom map that crashes or hangs on load | Only "the author must re-cook it" | **Wait for the author** |
+| Assets the author never shipped (blood turns into grey textures) | Only lists what is missing | **Wait for the author / find the companion pak** |
+| An old mod with broken references or blueprints incompatible with the new build | Only "do not install it" | **Wait for the author** |
+| Editing inside an asset (values, blueprint logic, references) | **Cannot** | Learn UAssetGUI / UE |
+
+**Knowing where the problem is ≠ being able to fix it.** Full write-up with
+measurements and three real incidents: **[LIMITATIONS.md](LIMITATIONS.md)**
 
 ### Features
 
