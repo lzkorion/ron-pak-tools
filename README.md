@@ -9,6 +9,8 @@ Detect and repair Ready or Not mods that broke after a game update.
 > 本项目**不含**任何游戏资产、游戏数据清单或 Epic 工具。
 > "Ready or Not" 为 VOID Interactive 商标；"Unreal" 为 Epic Games 商标。
 
+![主界面](docs/screenshots/01-main.png)
+
 ---
 
 ## 中文
@@ -68,6 +70,10 @@ python tools/ronconvert.py "C:\你的模组文件夹" --dry-run
 | **本来就可用** | 没有可剥的冲突资产 | 不用动 |
 | **已被官方完全取代** | 剥离后一条不剩 | **删除该模组** |
 | **无法处理** | 不是合法 pak | 人工检查 |
+
+转换完成后会弹窗告知输出目录，日志里给出每个模组的结论和行动建议：
+
+![转换完成](docs/screenshots/02-done.png)
 
 ### ★ 为什么不是「官方已有就全剥」
 
@@ -148,6 +154,8 @@ ron-pak-tools/
 ## English
 
 ### What this is
+
+![Main window](docs/screenshots/01-main.png)
 
 Every major **Ready or Not** update absorbs popular mods into the base game,
 while players' mod `.pak` files keep overriding the same asset paths.

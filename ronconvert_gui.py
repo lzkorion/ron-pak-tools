@@ -384,8 +384,24 @@ class App:
         self.cfg = load_config()
 
         root.title(APP_TITLE)
-        root.geometry("980x720")
-        root.minsize(780, 560)
+        # 窗口尺寸：默认 980x720；可用 --size 宽x高 覆盖
+        # （小屏笔记本 / 截图时有用）。自动限制在屏幕内。
+        size = "980x720"
+        for i, a in enumerate(sys.argv):
+            if a == "--size" and i + 1 < len(sys.argv):
+                size = sys.argv[i + 1]
+            elif a.startswith("--size="):
+                size = a.split("=", 1)[1]
+        try:
+            sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+            w, h = (int(x) for x in size.lower().split("x"))
+            w = max(780, min(w, sw - 40))
+            h = max(480, min(h, sh - 80))
+            size = f"{w}x{h}"
+        except Exception:
+            size = "980x720"
+        root.geometry(size)
+        root.minsize(780, 520)
 
         style = ttk.Style()
         try:
@@ -470,7 +486,7 @@ class App:
         # ---- 日志 ----
         lf = ttk.LabelFrame(root, text=" 3. 日志 ", padding=(8, 6))
         lf.pack(fill="both", expand=True, padx=14, pady=(8, 12))
-        self.log = tk.Text(lf, wrap="none", height=18,
+        self.log = tk.Text(lf, wrap="none", height=10,
                            font=("Consolas", 9), background="#fbfbfb")
         ys = ttk.Scrollbar(lf, orient="vertical", command=self.log.yview)
         xs = ttk.Scrollbar(lf, orient="horizontal", command=self.log.xview)
